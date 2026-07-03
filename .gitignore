@@ -1,0 +1,31 @@
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+# Log files
+*.log
+logs/
+log/
+
+# IDE configurations
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build and distribution directories
+dist/
+build/
+*.egg-info/
+*.egg
+
+
+# PyTorch/TensorFlow checkpoints
+*.pth
+*.pt
+*.ckpt
+
+work_dirs/
