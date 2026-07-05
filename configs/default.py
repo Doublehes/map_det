@@ -10,8 +10,9 @@ def get_default_cfg():
 
     cfg.data_root = "/media/double/SAMSUNG/datasets"
     # cfg.train_ann_file = "/media/flow/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_multiview/train_line_only/own_map_infos_merge_extra_train.pkl"
-    cfg.train_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/dctj218_yubei.pkl"
-    cfg.val_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/dctj218_yubei.pkl"
+    cfg.train_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/trainlabel_sampled.pkl"
+    # cfg.val_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/dctj218_yubei.pkl"
+    cfg.val_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/old88_nanchuan.pkl"
 
     cfg.cat2id = {'guide_line': 0, 'boundary': 1}
     cfg.num_classes = len(cfg.cat2id)
@@ -34,7 +35,7 @@ def get_default_cfg():
     cfg.canvas_size = (160, 80)
 
     cfg.bev_embed_dims = 256
-    cfg.embed_dims = 512
+    cfg.embed_dims = 256
     cfg.num_feat_levels = 2
     cfg.num_points = 16
     cfg.num_queries = 32
@@ -45,6 +46,7 @@ def get_default_cfg():
 
     cfg.bevformer_num_layers = 1
     cfg.num_points_in_pillar = 4
+    cfg.num_sampling_points = 8   # BEVFormer encoder 中的 deformable attention 采样点数
 
     cfg.decoder_num_layers = 1
     cfg.num_heads = 8
@@ -59,7 +61,7 @@ def get_default_cfg():
     cfg.focal_alpha = 0.25
     cfg.l1_beta = 0.01
 
-    cfg.batch_size = 8
+    cfg.batch_size = 4
     cfg.num_epochs = 10
     cfg.num_workers = 4
     cfg.lr = 5e-4

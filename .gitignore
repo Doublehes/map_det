@@ -28,4 +28,6 @@ build/
 *.pt
 *.ckpt
 
+
+AGENTS.md
 work_dirs/

@@ -17,6 +17,46 @@ from .pipeline import (
     vectorize_map, rasterize_map
 )
 
+import random as _random
+
+
+def _photo_metric_distortion(img, brightness_delta=32, contrast_range=(0.5, 1.5),
+                              saturation_range=(0.5, 1.5), hue_delta=18):
+    """像素级光度增强: brightness, contrast, saturation, hue (不影响 3D 信息)"""
+    # 随机亮度
+    if _random.randint(0, 1):
+        delta = _random.uniform(-brightness_delta, brightness_delta)
+        img += delta
+
+    mode = _random.randint(0, 1)
+    # mode=1 时先做对比度
+    if mode == 1 and _random.randint(0, 1):
+        alpha = _random.uniform(*contrast_range)
+        img *= alpha
+
+    # BGR → HSV
+    img_hsv = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    # 随机饱和度
+    if _random.randint(0, 1):
+        img_hsv[..., 1] *= _random.uniform(*saturation_range)
+
+    # 随机色相
+    if _random.randint(0, 1):
+        img_hsv[..., 0] += _random.uniform(-hue_delta, hue_delta)
+        img_hsv[..., 0][img_hsv[..., 0] > 360] -= 360
+        img_hsv[..., 0][img_hsv[..., 0] < 0] += 360
+
+    # HSV → BGR
+    img = cv2.cvtColor(img_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+
+    # mode=0 时后做对比度
+    if mode == 0 and _random.randint(0, 1):
+        alpha = _random.uniform(*contrast_range)
+        img *= alpha
+
+    return img
+
 
 class MapTRDataset(Dataset):
     """MapTR数据集: 从pkl加载多视角图像 + 道路线标注"""
@@ -82,8 +122,10 @@ class MapTRDataset(Dataset):
             img = img.astype(np.float32)
             orig_h, orig_w = img.shape[:2]
 
-            # resize + normalize + HWC→CHW
+            # resize + photometric augmentation (train only) + normalize
             img = resize_image(img, (self.cfg.img_h, self.cfg.img_w))
+            if self.is_train:
+                img = _photo_metric_distortion(img)
             img = normalize_image(img, self.cfg.img_norm['mean'], self.cfg.img_norm['std'])
             img = torch.from_numpy(img).permute(2, 0, 1)
 

@@ -40,7 +40,7 @@ def vectorize_map(
     Args:
         permute: 对每条开放线生成正向+反向两个方向 (方向歧义处理)
     返回:
-        {cls_id: (num_lines, num_permute, num_points, 2)}  每点归一化到[-1,1]
+        {cls_id: (num_lines, num_permute, num_points, 2)}  每点归一化到[0,1]
     """
     vectors = {}
     for cls_id, lines in map_geoms.items():
@@ -59,11 +59,9 @@ def vectorize_map(
             else:
                 sampled = np.zeros((num_points, 2), dtype=np.float32)
 
-            # 3. 归一化: 以ROI中心为原点, 缩放到[-1, 1]
+            # 3. 归一化: _load_map已减去pc_range[0/1], 坐标在[0, roi], 直接除以roi → [0, 1]
             if normalize:
-                cx, cy = roi_size[0] / 2, roi_size[1] / 2
-                sampled = sampled - np.array([cx, cy])
-                sampled = sampled / np.array([roi_size[0] / 2, roi_size[1] / 2])
+                sampled = sampled / np.array([roi_size[0], roi_size[1]], dtype=np.float32)
 
             # 4. 生成正向+反向两个排列 (开放线遍历方向歧义)
             if permute:
@@ -121,9 +119,7 @@ def rasterize_map(
         mask = np.zeros((h, w), dtype=np.uint8)
         for line in lines:
             pts_2d = line[0] if line.ndim == 3 else line
-            denormalized = pts_2d.copy()
-            cx, cy = roi_size[0] / 2, roi_size[1] / 2
-            denormalized = denormalized * np.array([roi_size[0] / 2, roi_size[1] / 2]) + np.array([cx, cy])
+            denormalized = pts_2d * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
 
             pts = []
             for p in denormalized:

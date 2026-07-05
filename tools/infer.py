@@ -20,8 +20,7 @@ PRED_COLORS = {0: 'cyan', 1: 'orange'}
 
 
 def denormalize_lines(lines, roi_size):
-    cx, cy = roi_size[0] / 2, roi_size[1] / 2
-    return lines * np.array([roi_size[0] / 2, roi_size[1] / 2]) + np.array([cx, cy])
+    return lines * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
 
 
 def project_to_image(pts_3d, K, extr):
@@ -30,7 +29,7 @@ def project_to_image(pts_3d, K, extr):
     if isinstance(extr, torch.Tensor):
         extr = extr.numpy()
     if pts_3d.shape[1] == 2:
-        z = np.zeros((pts_3d.shape[0], 1), dtype=np.float32)
+        z = -np.ones((pts_3d.shape[0], 1), dtype=np.float32)
         pts_3d = np.concatenate([pts_3d, z], axis=-1)
     N = pts_3d.shape[0]
     ones = np.ones((N, 1), dtype=np.float32)
@@ -65,13 +64,30 @@ def get_cam_names(sample):
     return cam_names[:cfg.num_cams]
 
 
-def draw_bev(ax, gt_lines, pred_lines, title):
+def draw_seg_mask(ax, mask, title, pc_range):
+    extent = [pc_range[0], pc_range[3], pc_range[1], pc_range[4]]
+    ax.imshow(mask[0], extent=extent, origin='lower', cmap='hot', alpha=0.7, vmin=0, vmax=1)
+    ax.set_xlim(pc_range[0], pc_range[3])
+    ax.set_ylim(pc_range[1], pc_range[4])
+    ax.set_aspect('equal')
+    ax.set_title(title, fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.plot(0, 0, 'k^', markersize=10)
+    ax.add_patch(Rectangle((pc_range[0], pc_range[1]), cfg.roi_size[0], cfg.roi_size[1],
+                            fill=False, edgecolor='gray', linestyle='--', alpha=0.5))
+
+
+def draw_bev(ax, gt_lines, pred_lines, title, gt_seg_mask=None):
     pc = cfg.pc_range
     ax.set_xlim(pc[0], pc[3])
     ax.set_ylim(pc[1], pc[4])
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.3)
     ax.set_title(title, fontsize=10)
+
+    if gt_seg_mask is not None:
+        extent = [pc[0], pc[3], pc[1], pc[4]]
+        ax.imshow(gt_seg_mask[0], extent=extent, origin='lower', cmap='hot', alpha=0.2, vmin=0, vmax=1)
 
     ax.add_patch(Rectangle((pc[0], pc[1]), pc[3]-pc[0], pc[4]-pc[1],
                             fill=False, edgecolor='gray', linestyle='--', alpha=0.5))
@@ -141,7 +157,7 @@ def infer():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    ds = MapTRDataset(cfg.val_ann_file, cfg.data_root, cfg, is_train=False)
+    ds = MapTRDataset(cfg.val_ann_file, cfg.data_root, cfg, is_train=True)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=collate_fn)
 
     model = MapTR(cfg).to(cfg.device)
@@ -152,6 +168,8 @@ def infer():
 
     rendered = 0
     for batch_idx, batch in enumerate(loader):
+        if batch_idx % 10 != 0:
+            continue
         if rendered >= args.num_samples:
             break
 
@@ -159,7 +177,10 @@ def infer():
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
 
-        cls_scores, reg_preds, _ = model(imgs, intrinsics, extrinsics)
+        cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics)
+
+        gt_seg_mask = batch['semantic_mask'][0].numpy()
+        pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()
 
         pred_lines, pred_scores = decode_predictions(
             cls_scores[0], reg_preds[0], cfg.roi_size, cfg.pc_range, args.score_thresh)
@@ -169,10 +190,19 @@ def infer():
 
         cam_names = get_cam_names(sample)
 
-        fig = plt.figure(figsize=(20, 12))
-        ax_bev = fig.add_subplot(3, 3, (1, 3))
+        fig = plt.figure(figsize=(20, 14))
+        ax_bev = fig.add_subplot(3, 3, 1)
         draw_bev(ax_bev, gt_raw, pred_lines,
-                 f'BEV — GT(lime/red)  Pred(cyan/orange)\n{sample["token"][:16]}... | score>{args.score_thresh}')
+                 f'BEV — GT(lime/red)  Pred(cyan/orange)\n{sample["token"][:16]}... | score>{args.score_thresh}',
+                 gt_seg_mask=gt_seg_mask)
+
+        ax_gt_seg = fig.add_subplot(3, 3, 2)
+        draw_seg_mask(ax_gt_seg, gt_seg_mask.astype(np.float32),
+                      'GT Segmentation Mask', cfg.pc_range)
+
+        ax_pred_seg = fig.add_subplot(3, 3, 3)
+        draw_seg_mask(ax_pred_seg, pred_seg_mask,
+                      f'Pred Segmentation Mask\nscore>{args.score_thresh}', cfg.pc_range)
 
         cam_axes = [fig.add_subplot(3, 3, 4 + ci) for ci in range(cfg.num_cams)]
         draw_cams(cam_axes, imgs[0], intrinsics[0].cpu(), extrinsics[0].cpu(), gt_raw, pred_lines, cam_names)

@@ -18,17 +18,10 @@ CAT_COLORS = {0: 'lime', 1: 'red'}
 
 
 def denormalize_vectors(norm_pts, roi_size):
-    """将归一化[-1,1]的点还原到BEV坐标"""
-    cx, cy = roi_size[0] / 2, roi_size[1] / 2
-    pts = norm_pts * np.array([roi_size[0] / 2, roi_size[1] / 2]) + np.array([cx, cy])
+    """将归一化[0,1]的点还原到BEV坐标"""
+    pts = norm_pts * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
     return pts
 
-
-def to_vehicle_frame(bev_pts, pc_range):
-    """从BEV局部坐标转换到车辆坐标系"""
-    x = bev_pts[:, 0] + pc_range[0]
-    y = bev_pts[:, 1] + pc_range[1]
-    return np.stack([x, y], axis=-1)
 
 
 def project_to_image(pts_3d, K, extr):

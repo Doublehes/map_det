@@ -13,9 +13,7 @@ from models.maptr import MapTR
 
 
 def denormalize_lines(lines, roi_size):
-    cx, cy = roi_size[0] / 2, roi_size[1] / 2
-    lines = lines * np.array([roi_size[0] / 2, roi_size[1] / 2]) + np.array([cx, cy])
-    return lines
+    return lines * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
 
 
 def visualize_bev(bev_feat, save_path):

@@ -2,18 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-class MultiheadAttention(nn.Module):
-    def __init__(self, embed_dims, num_heads=8, dropout=0.1):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dims, num_heads, dropout=dropout, batch_first=True)
-
-    def forward(self, query, key=None, value=None, key_padding_mask=None):
-        if key is None:
-            key = query
-        if value is None:
-            value = key
-        return self.attn(query, key, value, key_padding_mask=key_padding_mask)[0]
+from .deformable_attn import CustomMSDeformableAttention
 
 
 class FFN(nn.Module):
@@ -31,120 +20,108 @@ class FFN(nn.Module):
         return self.net(x)
 
 
-class DeformableCrossAttention(nn.Module):
-    """Deformable cross-attention: query → sampling offsets → grid_sample
-
-    代替标准 MHA, 每个 query 只采样 num_points 个位置 (而非全部 BEV token).
-    计算量: O(num_queries × num_points), 与 BEV 分辨率无关.
-    """
-    def __init__(self, embed_dims=512, num_points=16, num_queries=32):
-        super().__init__()
-        self.embed_dims = embed_dims
-        self.num_points = num_points
-
-        # 每个 query 的参考点 (归一化坐标 [0,1])
-        self.ref_points = nn.Embedding(num_queries, 2)
-        nn.init.uniform_(self.ref_points.weight, 0.0, 1.0)
-
-        # 采样偏移 + 注意力权重
-        self.offset_proj = nn.Linear(embed_dims, num_points * 2)
-        self.weight_proj = nn.Linear(embed_dims, num_points)
-        self.value_proj = nn.Conv2d(embed_dims, embed_dims, 1)
-        self.output_proj = nn.Linear(embed_dims, embed_dims)
-
-    def forward(self, query, bev_feat_2d):
-        """
-        query: (B, N_q, C)        decoder query
-        bev_feat_2d: (B, C, H, W)  BEV特征图 (保持2D空间结构)
-        """
-        B, N_q, C = query.shape
-        _, _, H, W = bev_feat_2d.shape
-
-        # 1. Value 投影
-        value = self.value_proj(bev_feat_2d)
-
-        # 2. 参考点 + 偏移 → 采样位置
-        ref = self.ref_points.weight.view(1, N_q, 1, 2)
-        offset = self.offset_proj(query).view(B, N_q, self.num_points, 2)
-        offset_norm = offset / torch.tensor([W, H], device=query.device).view(1, 1, 1, 2)
-        sampling_loc = ref + offset_norm
-
-        # 3. 注意力权重 (softmax over points)
-        weights = self.weight_proj(query).softmax(dim=-1)
-
-        # 4. grid_sample 双线性插值采样
-        grid = sampling_loc.reshape(B, N_q * self.num_points, 1, 2) * 2 - 1
-        sampled = F.grid_sample(
-            value, grid,
-            mode='bilinear', padding_mode='zeros', align_corners=False,
-        )
-        sampled = sampled.squeeze(-1)
-        sampled = sampled.view(B, C, N_q, self.num_points)
-        sampled = sampled.permute(0, 2, 3, 1)
-
-        # 5. 加权求和
-        out = (sampled * weights.unsqueeze(-1)).sum(dim=2)
-        return self.output_proj(out)
-
-
 class MapTransformerLayer(nn.Module):
-    def __init__(self, embed_dims, num_heads=8, ffn_channels=1024, dropout=0.1, num_queries=32, num_points=16):
-        super().__init__()
-        self.self_attn = MultiheadAttention(embed_dims, num_heads, dropout)
-        self.cross_attn = DeformableCrossAttention(embed_dims, num_points, num_queries)
-        self.ffn = FFN(embed_dims, ffn_channels, dropout)
-        self.norm1 = nn.LayerNorm(embed_dims)
-        self.norm2 = nn.LayerNorm(embed_dims)
-        self.norm3 = nn.LayerNorm(embed_dims)
-        self.dropout = nn.Dropout(dropout)
+    """Decoder layer: self_attn → norm → cross_attn → norm → ffn → norm"""
 
-    def forward(self, query, bev_feat_2d, query_pos=None):
-        if query_pos is not None:
-            q = query + query_pos
-        else:
-            q = query
-
-        q = self.norm1(query + self.dropout(self.self_attn(q)))
-        q = self.norm2(q + self.dropout(self.cross_attn(q, bev_feat_2d)))
-        q = self.norm3(q + self.dropout(self.ffn(q)))
-        return q
-
-
-class MapTransformerDecoder(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.embed_dims = cfg.embed_dims
-        self.bev_embed_dims = cfg.bev_embed_dims
-        self.num_layers = cfg.decoder_num_layers
-        self.num_queries = cfg.num_queries
+        self.num_heads = cfg.num_heads
 
-        self.query_embed = nn.Embedding(self.num_queries, self.embed_dims)
-        self.query_pos = nn.Parameter(torch.randn(1, self.num_queries, self.embed_dims) * 0.02)
+        self.self_attn = nn.MultiheadAttention(
+            self.embed_dims, self.num_heads, dropout=cfg.dropout, batch_first=False)
 
-        self.input_proj = nn.Conv2d(self.bev_embed_dims, self.embed_dims, kernel_size=1)
+        self.cross_attn = CustomMSDeformableAttention(
+            embed_dims=self.embed_dims,
+            num_heads=self.num_heads,
+            num_levels=1,
+            num_points=cfg.num_points,
+            dropout=cfg.dropout,
+            batch_first=False,
+        )
 
-        self.layers = nn.ModuleList([
-            MapTransformerLayer(
-                embed_dims=self.embed_dims,
-                num_heads=cfg.num_heads,
-                ffn_channels=cfg.ffn_channels,
-                dropout=cfg.dropout,
-                num_queries=cfg.num_queries,
-                num_points=cfg.num_points,
-            ) for _ in range(self.num_layers)
-        ])
+        self.ffn = FFN(self.embed_dims, cfg.ffn_channels, cfg.dropout)
 
-    def forward(self, bev_feat_2d):
-        """
-        bev_feat_2d: (B, 256, 40, 80)  BEV特征图 (保持2D)
-        """
-        B = bev_feat_2d.shape[0]
-        query = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-        query_pos = self.query_pos.expand(B, -1, -1)
+        self.norm1 = nn.LayerNorm(self.embed_dims)
+        self.norm2 = nn.LayerNorm(self.embed_dims)
+        self.norm3 = nn.LayerNorm(self.embed_dims)
 
-        memory = self.input_proj(bev_feat_2d)
+    def forward(self, query, key, value, reference_points=None,
+                spatial_shapes=None, level_start_index=None,
+                query_key_padding_mask=None, key_padding_mask=None):
+        # self-attention
+        identity = query
+        q = self.norm1(query)
+        q = self.self_attn(q, q, q, key_padding_mask=query_key_padding_mask)[0]
+        query = identity + q
 
-        for layer in self.layers:
-            query = layer(query, memory, query_pos)
+        # cross-attention
+        identity = query
+        q = self.norm2(query)
+        q = self.cross_attn(
+            q, key, value, identity=None,
+            key_padding_mask=key_padding_mask,
+            reference_points=reference_points,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+        )
+        query = identity + q
+
+        # FFN
+        identity = query
+        q = self.norm3(query)
+        q = self.ffn(q)
+        query = identity + q
 
         return query
+
+
+class MapTransformerDecoderNew(nn.Module):
+    """Decoder with reference point iteration (1 layer)."""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            MapTransformerLayer(cfg) for _ in range(cfg.decoder_num_layers)
+        ])
+
+    def forward(self, query, key, value, reference_points,
+                spatial_shapes, level_start_index,
+                reg_branches=None,
+                query_key_padding_mask=None,
+                key_padding_mask=None):
+        """
+        query: (num_q, bs, embed_dims)
+        key/value: (H*W, bs, embed_dims)
+        reference_points: (bs, num_q, num_pts, 2)  normalized [0,1]
+        reg_branches: list of nn.Module, one per layer
+        """
+        output = query
+        intermediate = []
+        intermediate_reference_points = []
+
+        for lid, layer in enumerate(self.layers):
+            # y-axis reversal
+            tmp = reference_points.clone()
+            tmp[..., 1:2] = 1.0 - reference_points[..., 1:2]
+
+            output = layer(
+                output, key, value,
+                reference_points=tmp,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                query_key_padding_mask=query_key_padding_mask,
+                key_padding_mask=key_padding_mask,
+            )
+
+            if reg_branches is not None:
+                reg_points = reg_branches[lid](output.permute(1, 0, 2))
+                bs, num_q, np2 = reg_points.shape
+                reg_points = reg_points.view(bs, num_q, np2 // 2, 2)
+                new_reference_points = reg_points.sigmoid()
+                reference_points = new_reference_points.clone().detach()
+
+            intermediate.append(output.permute(1, 0, 2))
+            intermediate_reference_points.append(new_reference_points)
+
+        return intermediate, intermediate_reference_points

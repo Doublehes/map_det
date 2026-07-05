@@ -18,6 +18,11 @@ from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 
 
+def _get_lr_str(optimizer):
+    lrs = sorted(set(round(g['lr'], 8) for g in optimizer.param_groups))
+    return 'lr=' + ', '.join(f'{lr:.2e}' for lr in lrs)
+
+
 def build_optimizer(model, cfg):
     param_groups = []
     for name, param in model.named_parameters():
@@ -32,7 +37,7 @@ def build_optimizer(model, cfg):
     return AdamW(param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
 
-def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg):
+def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=False):
     model.train()
     total_loss = total_cls_loss = total_reg_loss = total_seg_loss = 0.0
 
@@ -47,11 +52,11 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg):
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         t_model = time.time()
-        cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics)
+        cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics, seg_only=seg_only)
 
         batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
 
-        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu)
+        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, seg_only=seg_only)
         loss = sum(loss_dict.values())
 
         optimizer.zero_grad()
@@ -75,15 +80,16 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg):
             iters_done = epoch * len(loader) + batch_idx + 1
             iters_total = cfg.num_epochs * len(loader)
             eta = (iters_total - iters_done) * iter_time
+            line_loss = '' if seg_only else f'cls={loss_dict.get("cls_loss",0):.4f} reg={loss_dict.get("reg_loss",0):.4f} '
             log = (
                 f'[E {epoch+1}/{cfg.num_epochs}] [{batch_idx}/{len(loader)}] '
-                f'loss={loss.item():.4f} '
-                f'cls={loss_dict.get("cls_loss",0):.4f} '
-                f'reg={loss_dict.get("reg_loss",0):.4f} '
+                f'{_get_lr_str(optimizer)} '
+                f'ETA={eta/60:.0f}min '
+                f'data_t={avg_data:.3f}s '
+                f'model_t={avg_model:.3f}s '
+                f'loss_total={loss.item():.4f} '
+                f'{line_loss}'
                 f'seg={loss_dict.get("seg_loss",0):.4f}+{loss_dict.get("dice_loss",0):.4f} '
-                f'data={avg_data*1000:.0f}ms '
-                f'model={avg_model*1000:.0f}ms '
-                f'ETA={eta/60:.0f}min'
             )
             print(log)
 
@@ -92,7 +98,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg):
 
     epoch_time = time.time() - epoch_start
     avg_loss = total_loss / len(loader)
-    print(f'[Epoch {epoch+1}] 平均 loss={avg_loss:.4f} 耗时={epoch_time:.0f}s')
+    print(f'[Epoch {epoch+1}] 平均 loss={avg_loss:.4f} {_get_lr_str(optimizer)} 耗时={epoch_time:.0f}s')
     return avg_loss
 
 
@@ -134,6 +140,8 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='恢复训练的 checkpoint')
     parser.add_argument('--pretrained', type=str, default=None, help='预训练权重 (仅加载模型, 从epoch0开始)')
     parser.add_argument('--freeze-backbone', action='store_true', help='冻结backbone只训练其余部分')
+    parser.add_argument('--seg-only', action='store_true', help='仅训练分割头, 跳过线分类和回归')
+    parser.add_argument('--epochs', type=int, default=None, help='覆盖 cfg.num_epochs')
     args = parser.parse_args()
 
     print(f'[设备] {cfg.device}')
@@ -173,10 +181,23 @@ def main():
     )
 
     model = MapTR(cfg).to(cfg.device)
+    # model.bev_encoder.debug_dir = "./debug_bev_porj"
+    # print(model)
     start_epoch = 0
+
+    if args.epochs is not None:
+        cfg.num_epochs = args.epochs
 
     if args.pretrained and os.path.exists(args.pretrained):
         load_pretrained(model, args.pretrained, cfg, args.freeze_backbone)
+
+    if args.seg_only:
+        for name, param in model.named_parameters():
+            if 'decoder' in name or name.startswith('head.'):
+                param.requires_grad = False
+        frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f'[分割模式] decoder + head 已冻结, {frozen/1e6:.1f}M/{total/1e6:.1f}M 参数冻结')
 
     optimizer = build_optimizer(model, cfg)
     scheduler = None
@@ -193,7 +214,7 @@ def main():
     print(f'[模型] 总参数: {total_params/1e6:.2f}M, 可训练: {trainable_params/1e6:.2f}M')
 
     for epoch in range(start_epoch, cfg.num_epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, epoch, cfg)
+        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, epoch, cfg, seg_only=args.seg_only)
         save_checkpoint(model, optimizer, epoch, cfg, args.work_dir)
 
     print('[训练完成]')
