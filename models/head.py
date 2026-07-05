@@ -157,7 +157,7 @@ class MapSegHead(nn.Module):
         self._init_bias()
 
     def _init_bias(self):
-        nn.init.constant_(self.upsample[-1].bias, -2.19)
+        nn.init.constant_(self.upsample[-1].bias, math.log(0.01 / 0.99))
 
     def forward(self, bev_feat):
         x = self.relu(self.conv_in(bev_feat))
