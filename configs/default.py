@@ -8,11 +8,12 @@ class Config:
 def get_default_cfg():
     cfg = Config()
 
-    cfg.data_root = "/media/double/SAMSUNG/datasets"
-    # cfg.train_ann_file = "/media/flow/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_multiview/train_line_only/own_map_infos_merge_extra_train.pkl"
-    cfg.train_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/trainlabel_sampled.pkl"
+    cfg.data_root = "/media/flow/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_data_multiview"
+    cfg.train_ann_file = "/media/flow/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_multiview/train_line_only/own_map_infos_merge_extra_train.pkl"
+    # cfg.train_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/trainlabel_sampled.pkl"
     # cfg.val_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/dctj218_yubei.pkl"
-    cfg.val_ann_file = "/media/double/SAMSUNG/datasets/trainlabel_line_multiview/old88_nanchuan.pkl"
+    # cfg.val_ann_file = "/media/flow/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_multiview/train_line_only/own_map_infos_merge_extra_val.pkl"
+    cfg.val_ann_file = "/mnt/hard_disk/data/trainlabel_line_multiview/origin_label_for_evaluation/x30_jialing_20260612_loop2.pkl"
 
     cfg.cat2id = {'guide_line': 0, 'boundary': 1}
     cfg.num_classes = len(cfg.cat2id)
@@ -32,7 +33,7 @@ def get_default_cfg():
     cfg.roi_size = (40, 20)
     cfg.bev_h = 40
     cfg.bev_w = 80
-    cfg.canvas_size = (160, 80)
+    cfg.canvas_size = (80, 160)
 
     cfg.bev_embed_dims = 256
     cfg.embed_dims = 256
@@ -61,7 +62,7 @@ def get_default_cfg():
     cfg.focal_alpha = 0.25
     cfg.l1_beta = 0.01
 
-    cfg.batch_size = 4
+    cfg.batch_size = 8
     cfg.num_epochs = 10
     cfg.num_workers = 4
     cfg.lr = 5e-4

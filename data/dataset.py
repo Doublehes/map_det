@@ -93,7 +93,7 @@ class MapTRDataset(Dataset):
 
         if self.is_train:
             sem_mask = self._load_semantic_mask(sample)
-            ret['semantic_mask'] = sem_mask    # (1, 160, 80)
+            ret['semantic_mask'] = sem_mask    # (1, 80, 160)
 
         return ret
 
@@ -185,7 +185,7 @@ class MapTRDataset(Dataset):
         vectors = self._load_map(sample)
         sem_mask = rasterize_map(
             vectors,
-            canvas_size=self.cfg.canvas_size,  # (160, 80)
+            canvas_size=self.cfg.canvas_size,  # (80, 160) = (H=行/Y, W=列/X)
             roi_size=self.cfg.roi_size,        # (40, 20)
             thickness=2,
         )
@@ -221,6 +221,6 @@ def collate_fn(batch):
 
     if 'semantic_mask' in batch[0]:
         sem_masks = torch.stack([b['semantic_mask'] for b in batch], dim=0)
-        ret['semantic_mask'] = sem_masks  # (B, 1, 160, 80)
+        ret['semantic_mask'] = sem_masks  # (B, 1, 80, 160)
 
     return ret

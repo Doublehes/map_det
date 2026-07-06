@@ -1,137 +1,32 @@
-"""可视化数据集: BEV + 多相机图像上的GT线投影"""
+"""可视化数据集: BEV + BEV掩码 + 多相机图像上的GT线投影 (纯OpenCV)"""
 import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from configs.default import cfg
 from data.dataset import MapTRDataset
 
 CAT_NAMES = {0: 'guide_line', 1: 'boundary'}
-CAT_COLORS = {0: 'lime', 1: 'red'}
-
-
-def denormalize_vectors(norm_pts, roi_size):
-    """将归一化[0,1]的点还原到BEV坐标"""
-    pts = norm_pts * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
-    return pts
-
+CAT_COLORS = {0: (0, 255, 0), 1: (0, 0, 255)}  # BGR
 
 
 def project_to_image(pts_3d, K, extr):
-    """3D点(车辆坐标系) → 图像像素坐标
-    
-    pts_3d: (N, 3)  or (N, 2)  (z=0 地面)
-    K: (3, 3)  内参
-    extr: (4, 4)  外参  vehicle→camera
-    """
+    """3D点(车辆坐标系) → 图像像素坐标"""
     if pts_3d.ndim == 2 and pts_3d.shape[1] == 2:
         z = np.zeros((pts_3d.shape[0], 1), dtype=np.float32)
         pts_3d = np.concatenate([pts_3d, z], axis=-1)
-
     N = pts_3d.shape[0]
     ones = np.ones((N, 1), dtype=np.float32)
-    homo = np.concatenate([pts_3d, ones], axis=-1)  # (N, 4)
-
-    cam_pts = (extr @ homo.T).T  # (N, 4)
+    homo = np.concatenate([pts_3d, ones], axis=-1)
+    cam_pts = (extr @ homo.T).T
     cam_pts = cam_pts[:, :3]
-    valid = cam_pts[:, 2] > 0.001  # 在相机前方
-
+    valid = cam_pts[:, 2] > 0.001
     z = np.clip(cam_pts[:, 2:3], 1e-6, None)
-    uv = (K @ np.concatenate([cam_pts[:, :2] / z, np.ones((N, 1), dtype=np.float32)], axis=-1).T).T
-    uv = uv[:, :2]
-    return uv, valid
-
-
-def draw_bev(ax, vectors_raw, vectors_norm, title='BEV', sem_mask=None):
-    pc_range = cfg.pc_range
-    roi_size = cfg.roi_size
-    ax.set_xlim(pc_range[0], pc_range[3])
-    ax.set_ylim(pc_range[1], pc_range[4])
-    ax.set_aspect('equal')
-    ax.set_xlabel('X (m)')
-    ax.set_ylabel('Y (m)')
-    ax.grid(True, alpha=0.3)
-    ax.set_title(title)
-
-    # 分割掩码热力图 (BEV背景)
-    if sem_mask is not None:
-        mask = sem_mask[0].numpy()  # (160, 80)
-        extent = [pc_range[0], pc_range[3], pc_range[1], pc_range[4]]
-        ax.imshow(mask, extent=extent, origin='lower', cmap='hot', alpha=0.3, vmin=0, vmax=1)
-
-    # 画ROI边界
-    from matplotlib.patches import Rectangle
-    roi_rect = Rectangle(
-        (pc_range[0], pc_range[1]),
-        roi_size[0], roi_size[1],
-        fill=False, edgecolor='gray', linestyle='--', alpha=0.5
-    )
-    ax.add_patch(roi_rect)
-
-    # 画车辆位置
-    ax.plot(0, 0, 'k^', markersize=10, label='ego')
-    ax.arrow(0, 0, 2, 0, head_width=0.3, head_length=0.5, fc='black', ec='black', alpha=0.5)
-
-    # 画原始GT线(来自raw数据, 车辆坐标系)
-    for cls_id, lines in vectors_raw.items():
-        color = CAT_COLORS.get(cls_id, 'white')
-        label = CAT_NAMES.get(cls_id, f'cls{cls_id}')
-        for pts in lines:
-            pts = np.array(pts)
-            ax.plot(pts[:, 0], pts[:, 1], color=color, linewidth=1.5,
-                    label=label if f'_{cls_id}' not in str(ax.get_legend_handles_labels()) else "")
-            ax.scatter(pts[0, 0], pts[0, 1], color=color, s=15, marker='o', zorder=3)
-            ax.scatter(pts[-1, 0], pts[-1, 1], color=color, s=15, marker='s', zorder=3)
-
-    handles, labels = ax.get_legend_handles_labels()
-    if handles:
-        by_label = dict(zip(labels, handles))
-        ax.legend(by_label.values(), by_label.keys(), loc='upper right')
-
-
-def draw_camera_view(axes, imgs, intrinsics, extrinsics, vectors_raw, cam_names):
-    """画6个相机视图, 叠加上投影的GT线"""
-    H, W = cfg.img_h, cfg.img_w
-    mean = np.array(cfg.img_norm['mean'], dtype=np.float32)
-    std = np.array(cfg.img_norm['std'], dtype=np.float32)
-
-    for ci in range(len(cam_names)):
-        ax = axes[ci]
-        # 反归一化图像 (mean, std)
-        img = imgs[ci].numpy().transpose(1, 2, 0)  # (H,W,3)
-        img = img * std + mean
-        img = np.clip(img, 0, 255).astype(np.uint8)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        ax.imshow(img)
-        ax.set_title(f'{ci}: {cam_names[ci]}', fontsize=8)
-        ax.axis('off')
-
-        Ki = intrinsics[ci]
-        extri = extrinsics[ci]
-
-        # 投影每条GT线到图像
-        for cls_id, lines in vectors_raw.items():
-            color = CAT_COLORS.get(cls_id, 'white')
-            for pts in lines:
-                pts = np.array(pts)
-                uv, valid = project_to_image(pts, Ki, extri)
-                if valid.sum() < 2:
-                    continue
-                # 只保留在图像内的点
-                in_img = (uv[:, 0] >= 0) & (uv[:, 0] < W) & (uv[:, 1] >= 0) & (uv[:, 1] < H) & valid
-                if in_img.sum() < 2:
-                    continue
-                uv_plot = uv[in_img]
-                ax.plot(uv_plot[:, 0], uv_plot[:, 1], color=color, linewidth=2)
-                ax.scatter(uv_plot[0, 0], uv_plot[0, 1], color=color, s=20, marker='o', zorder=3)
-                ax.scatter(uv_plot[-1, 0], uv_plot[-1, 1], color=color, s=20, marker='s', zorder=3)
+    uv = (K @ np.concatenate([cam_pts[:, :2] / z, np.ones((N, 1))], axis=-1).T).T
+    return uv[:, :2], valid
 
 
 def visualize_sample(sample_idx, save_dir, is_train=False):
@@ -141,8 +36,17 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         cfg=cfg,
         is_train=is_train,
     )
-
     Path(save_dir).mkdir(parents=True, exist_ok=True)
+
+    pc_min_x, pc_min_y, _, pc_max_x, pc_max_y, _ = cfg.pc_range
+    x_range = pc_max_x - pc_min_x  # 40
+    y_range = pc_max_y - pc_min_y  # 20
+
+    BEV_W, BEV_H = 800, 400       # BEV/掩码面板尺寸
+    GAP = 20
+    CANVAS_W = BEV_W * 2 + GAP     # 1620
+    CAM_W, CAM_H = 530, 260
+    CAM_GAP = 15
 
     for idx in sample_idx:
         item = dataset[idx]
@@ -151,43 +55,127 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         imgs = item['imgs']
         intrinsics = item['intrinsics']
         extrinsics = item['extrinsics']
-        token = item['token']
         sem_mask = item.get('semantic_mask')
+        vectors_raw = sample['map_geom']
 
-        # 相机名 (与 _load_images 排序逻辑一致)
-        available = sorted(k for k, v in sample['cams'].items() if v['img_fpath'] is not None)
-        cam_names = list(available) + ['dummy'] * max(0, cfg.num_cams - len(available))
-        cam_names = cam_names[:cfg.num_cams]
+        available_cams = sorted(k for k, v in sample['cams'].items() if v['img_fpath'] is not None)
 
-        # 原始GT线 (车辆坐标系, 地面z≈0)
-        vectors_raw = sample['map_geom']  # {cls_id: list of (N,3) arrays}
+        total_h = BEV_H + GAP + CAM_H * 2 + CAM_GAP + 20
+        canvas = np.zeros((total_h, CANVAS_W, 3), dtype=np.uint8)
 
-        fig = plt.figure(figsize=(20, 12))
+        # ========== BEV 俯视图 (左) ==========
+        bev = canvas[:BEV_H, :BEV_W]
 
-        # BEV (含分割掩码热力图)
-        ax_bev = fig.add_subplot(3, 3, (1, 3))
-        draw_bev(ax_bev, vectors_raw, item['vectors'],
-                 title=f'BEV GT Lines\n{token[:16]}... scene={sample["scene_name"]} idx={sample["sample_idx"]}',
-                 sem_mask=sem_mask)
+        # 网格
+        for x in range(-10, 31, 5):
+            px = int((x - pc_min_x) / x_range * BEV_W)
+            cv2.line(bev, (px, 0), (px, BEV_H), (50, 50, 50), 1)
+        for y in range(-10, 11, 5):
+            py = int((pc_max_y - y) / y_range * BEV_H)
+            cv2.line(bev, (0, py), (BEV_W, py), (50, 50, 50), 1)
 
-        # 相机视图 (数量与 imgs 一致)
-        n_cams = imgs.shape[0]
-        cam_axes = []
-        for ci in range(n_cams):
-            ax = fig.add_subplot(3, 3, 4 + ci)
-            cam_axes.append(ax)
-        draw_camera_view(cam_axes, imgs, intrinsics, extrinsics, vectors_raw, cam_names)
+        # 自车
+        ex = int((0 - pc_min_x) / x_range * BEV_W)
+        ey = int((pc_max_y - 0) / y_range * BEV_H)
+        tri = np.array([
+            [ex, ey - 10], [ex - 7, ey + 6], [ex + 7, ey + 6]
+        ], dtype=np.int32)
+        cv2.fillPoly(bev, [tri], (180, 180, 180))
+        cv2.arrowedLine(bev, (ex, ey), (ex + 40, ey), (100, 100, 100), 2, tipLength=0.3)
 
-        plt.tight_layout()
+        # GT 线
+        for cls_id, lines in vectors_raw.items():
+            color = CAT_COLORS.get(cls_id, (200, 200, 200))
+            for pts_list in lines:
+                pts = np.array(pts_list, dtype=np.float32)
+                if pts.shape[1] < 2:
+                    continue
+                xy = pts[:, :2]
+                col = ((xy[:, 0] - pc_min_x) / x_range * BEV_W).astype(np.int32)
+                row = ((pc_max_y - xy[:, 1]) / y_range * BEV_H).astype(np.int32)
+                pix = np.stack([col, row], axis=1)
+                cv2.polylines(bev, [pix], False, color, 2, lineType=cv2.LINE_AA)
+                cv2.circle(bev, tuple(pix[0]), 4, color, -1)
+                cv2.circle(bev, tuple(pix[-1]), 4, color, -1)
+
+        cv2.putText(bev, f'BEV  idx={idx}  {sample["scene_name"]}', (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
+        cv2.putText(bev, 'X(前)', (BEV_W - 50, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+        cv2.putText(bev, 'Y(左)', (4, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+
+        # ========== BEV 掩码 (右) ==========
+        mask_panel = canvas[:BEV_H, BEV_W + GAP:BEV_W * 2 + GAP]
+
+        if sem_mask is not None:
+            mask_raw = sem_mask[0].numpy()  # (80, 160)
+            mask_disp = (mask_raw * 255).astype(np.uint8)
+            mask_disp = cv2.resize(mask_disp, (BEV_W, BEV_H),
+                                   interpolation=cv2.INTER_NEAREST)
+            mask_bgr = cv2.cvtColor(mask_disp, cv2.COLOR_GRAY2BGR)
+            green = np.full_like(mask_bgr, (0, 255, 0), dtype=np.uint8)
+            mask_panel[:] = np.where(mask_bgr > 0, green, (25, 25, 25))
+            cv2.putText(mask_panel, f'BEV Mask (5x nearest)  shape={list(mask_raw.shape)}', (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        else:
+            mask_panel[:] = (25, 25, 25)
+            cv2.putText(mask_panel, 'No mask (eval mode)', (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+
+        # ========== 相机视图 ==========
+        mean = np.array(cfg.img_norm['mean'], dtype=np.float32)
+        std = np.array(cfg.img_norm['std'], dtype=np.float32)
+        cam_start_y = BEV_H + GAP
+        num_cams = min(len(available_cams), cfg.num_cams)
+
+        for ci in range(num_cams):
+            row = ci // 3
+            col = ci % 3
+            cx = col * (CAM_W + CAM_GAP)
+            cy = cam_start_y + row * (CAM_H + CAM_GAP)
+            panel = canvas[cy:cy + CAM_H, cx:cx + CAM_W]
+
+            # 反归一化
+            img = imgs[ci].numpy().transpose(1, 2, 0)
+            img = img * std + mean
+            img = np.clip(img, 0, 255).astype(np.uint8)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # 投影 GT 线
+            Ki = intrinsics[ci]
+            extri = extrinsics[ci]
+            for cls_id, lines in vectors_raw.items():
+                color = CAT_COLORS.get(cls_id, (200, 200, 200))
+                for pts_list in lines:
+                    pts = np.array(pts_list, dtype=np.float32)
+                    uv, valid = project_to_image(pts, Ki, extri)
+                    if valid.sum() < 2:
+                        continue
+                    in_img = (uv[:, 0] >= 0) & (uv[:, 0] < cfg.img_w) & \
+                             (uv[:, 1] >= 0) & (uv[:, 1] < cfg.img_h) & valid
+                    if in_img.sum() < 2:
+                        continue
+                    uv_proj = uv[in_img].astype(np.int32)
+                    for j in range(len(uv_proj) - 1):
+                        cv2.line(img, tuple(uv_proj[j]), tuple(uv_proj[j + 1]), color, 2)
+                    cv2.circle(img, tuple(uv_proj[0]), 3, color, -1)
+                    cv2.circle(img, tuple(uv_proj[-1]), 3, color, -1)
+
+            img_resized = cv2.resize(img, (CAM_W, CAM_H), interpolation=cv2.INTER_LINEAR)
+            panel[:] = img_resized
+            cv2.putText(panel, f'{ci}: {available_cams[ci]}', (5, 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+
+        # ========== 保存 ==========
         out_path = Path(save_dir) / f'vis_{idx:04d}.png'
-        plt.savefig(out_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
+        cv2.imwrite(str(out_path), canvas)
         print(f'[可视化] 已保存 {out_path}')
 
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='MapTR数据可视化')
+    parser = argparse.ArgumentParser(description='MapTR数据可视化 (OpenCV)')
     parser.add_argument('--indices', type=int, nargs='+', default=[0, 1, 2],
                         help='要可视化的样本索引')
     parser.add_argument('--save-dir', type=str, default='work_dirs/vis',

@@ -132,7 +132,7 @@ class MapTRHead(nn.Module):
 
 
 class MapSegHead(nn.Module):
-    """分割头: 上采样 BEV 特征到分割图"""
+    """分割头: 上采样 BEV 特征到分割图, 4x4px/m 均一分辨率"""
 
     def __init__(self, cfg):
         super().__init__()
@@ -146,13 +146,11 @@ class MapSegHead(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
         self.upsample = nn.Sequential(
-            nn.ConvTranspose2d(self.embed_dims, 128, kernel_size=(2, 1), stride=(2, 1)),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
+            nn.Conv2d(self.embed_dims, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(128, 64, kernel_size=(2, 1), stride=(2, 1)),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Conv2d(128, 1, kernel_size=1),
         )
         self._init_bias()
 
