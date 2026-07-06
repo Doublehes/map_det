@@ -52,7 +52,7 @@ class MapTR(nn.Module):
     def compute_loss(self, cls_scores, reg_preds, seg_preds, batch, seg_only=False):
         sem_mask = batch.get('semantic_mask')
         if sem_mask is not None:
-            sem_mask = sem_mask.to(seg_preds.device)
+            sem_mask = torch.flip(sem_mask, [2,]).to(seg_preds.device)
         return self.criterion(
             cls_scores, reg_preds,
             batch['vectors'],
