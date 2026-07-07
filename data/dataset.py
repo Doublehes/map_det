@@ -91,9 +91,8 @@ class MapTRDataset(Dataset):
             'sample_idx': sample['sample_idx'],
         }
 
-        if self.is_train:
-            sem_mask = self._load_semantic_mask(sample)
-            ret['semantic_mask'] = sem_mask    # (1, 80, 160)
+        sem_mask = self._load_semantic_mask(sample)
+        ret['semantic_mask'] = sem_mask    # (1, 80, 160)
 
         return ret
 
@@ -111,6 +110,7 @@ class MapTRDataset(Dataset):
                 available[cam_name] = cam_data
 
         sorted_cam_names = sorted(available.keys())
+        # sorted_cam_names = available.keys()
 
         imgs, intrinsics_list, extrinsics_list = [], [], []
         for cam_name in sorted_cam_names:
