@@ -44,9 +44,9 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
     data_times, model_times = [], []
     epoch_start = time.time()
 
+    t_data = time.time()
     for batch_idx, batch in enumerate(loader):
-        t_data = time.time()
-
+        
         imgs = batch['imgs'].to(cfg.device)
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
@@ -95,6 +95,8 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
 
         if scheduler is not None:
             scheduler.step()
+        
+        t_data = time.time()
 
     epoch_time = time.time() - epoch_start
     avg_loss = total_loss / len(loader)

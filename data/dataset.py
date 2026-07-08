@@ -14,7 +14,7 @@ if MAPTR_DIR not in sys.path:
 
 from .pipeline import (
     normalize_image, resize_image, resize_intrinsics,
-    vectorize_map, rasterize_map
+    vectorize_map, rasterize_map, compute_soft_heatmap
 )
 
 import random as _random
@@ -94,6 +94,9 @@ class MapTRDataset(Dataset):
         sem_mask = self._load_semantic_mask(sample)
         ret['semantic_mask'] = sem_mask    # (1, 80, 160)
 
+        soft_heatmap = self._load_soft_heatmap(sample)
+        ret['soft_heatmap'] = soft_heatmap  # (1, 80, 160)
+
         return ret
 
     def _load_images(self, sample):
@@ -143,7 +146,7 @@ class MapTRDataset(Dataset):
             dummy_img = torch.zeros((3, self.cfg.img_h, self.cfg.img_w), dtype=torch.float32)
             dummy_K = np.eye(3, dtype=np.float32)
             dummy_extr = np.array([
-                [0, -1, 0, 1000],
+                [0, -1, 0, 1000000],
                 [0, 0, -1, 0],
                 [1, 0, 0, 0],
                 [0, 0, 0, 1]
@@ -191,6 +194,17 @@ class MapTRDataset(Dataset):
         )
         return torch.from_numpy(sem_mask).float()
 
+    def _load_soft_heatmap(self, sample):
+        """计算BEV自适应高斯热力图: sigma=min(d_center+d_boundary, 5m)"""
+        vectors = self._load_map(sample)
+        heatmap = compute_soft_heatmap(
+            vectors,
+            canvas_size=self.cfg.canvas_size,
+            roi_size=self.cfg.roi_size,
+            max_sigma=getattr(self.cfg, 'heatmap_max_sigma', 5.0),
+        )
+        return torch.from_numpy(heatmap).float()
+
 
 def collate_fn(batch):
     """将batch内多个样本合并为一个batch tensor
@@ -222,5 +236,9 @@ def collate_fn(batch):
     if 'semantic_mask' in batch[0]:
         sem_masks = torch.stack([b['semantic_mask'] for b in batch], dim=0)
         ret['semantic_mask'] = sem_masks  # (B, 1, 80, 160)
+
+    if 'soft_heatmap' in batch[0]:
+        heatmaps = torch.stack([b['soft_heatmap'] for b in batch], dim=0)
+        ret['soft_heatmap'] = heatmaps  # (B, 1, 80, 160)
 
     return ret

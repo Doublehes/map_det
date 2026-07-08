@@ -135,6 +135,72 @@ def rasterize_map(
     return sem_mask
 
 
+def compute_soft_heatmap(
+    vectors: Dict[int, np.ndarray],
+    canvas_size: Tuple[int, int],
+    roi_size: Tuple[float, float],
+    max_sigma: float = 5.0,
+) -> np.ndarray:
+    """计算BEV道路热力图, 边界处值≈0.1
+
+    在中心线处估算道路半宽 hw, 全局常量 sigma = hw:
+        hw = median(d_boundary at centerline pixels)
+        heatmap = exp(-2.303 × (d_center / hw)²)    边界处≈0.1
+
+    Args:
+        vectors: {cls_id: (N, 2|1, num_points, 2)} 归一化[0,1]的向量线
+        canvas_size: (H, W) 输出画布尺寸
+        roi_size: (x_range, y_range) 米
+        max_sigma: sigma上限(米), 默认5.0
+    Returns:
+        (1, H, W) float32 heatmap, 值域[0,1]
+    """
+    h, w = canvas_size
+    pixels_per_meter = w / roi_size[0]
+
+    center_canvas = np.zeros((h, w), dtype=np.uint8)
+    boundary_canvas = np.zeros((h, w), dtype=np.uint8)
+
+    for cls_id, lines in vectors.items():
+        canvas = np.zeros((h, w), dtype=np.uint8)
+        for line in lines:
+            pts_2d = line[0] if line.ndim == 3 else line
+            denormalized = pts_2d * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
+            pts = []
+            for p in denormalized:
+                px = int(p[0] / roi_size[0] * w)
+                py = int(p[1] / roi_size[1] * h)
+                px = np.clip(px, 0, w - 1)
+                py = np.clip(py, 0, h - 1)
+                pts.append([px, py])
+            pts = np.array(pts, dtype=np.int32)
+            if len(pts) >= 2:
+                cv2.polylines(canvas, [pts], False, 255, thickness=1)
+
+        if cls_id == 0:
+            center_canvas = np.maximum(center_canvas, canvas)
+        elif cls_id == 1:
+            boundary_canvas = np.maximum(boundary_canvas, canvas)
+
+    if center_canvas.max() == 0:
+        return np.zeros((1, h, w), dtype=np.float32)
+
+    d_center = cv2.distanceTransform(255 - center_canvas, cv2.DIST_L2, 5).astype(np.float32)
+    d_c_m = d_center / pixels_per_meter
+
+    if boundary_canvas.max() > 0:
+        d_boundary = cv2.distanceTransform(255 - boundary_canvas, cv2.DIST_L2, 5).astype(np.float32)
+        d_b_m = d_boundary / pixels_per_meter
+        hw = np.median(d_b_m[center_canvas > 0])
+        hw = np.clip(hw, 0.5, max_sigma)
+    else:
+        hw = max_sigma
+
+    heatmap = np.exp(-2.303 * (d_c_m / hw) ** 2)
+
+    return heatmap[np.newaxis, ...]
+
+
 class Compose:
     def __init__(self, transforms: List):
         self.transforms = transforms
