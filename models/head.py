@@ -141,6 +141,7 @@ class MapSegHead(nn.Module):
         self.canvas_size = cfg.canvas_size
         self.bev_h = cfg.bev_h
         self.bev_w = cfg.bev_w
+        self.num_classes = cfg.num_classes
 
         self.conv_in = nn.Conv2d(self.in_channels, self.embed_dims, kernel_size=3, padding=1, bias=False)
         self.relu = nn.ReLU(inplace=True)
@@ -150,7 +151,7 @@ class MapSegHead(nn.Module):
             nn.Conv2d(self.embed_dims, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, 1, kernel_size=1),
+            nn.Conv2d(128, self.num_classes, kernel_size=1),
         )
         self._init_bias()
 

@@ -15,10 +15,25 @@ from models.maptr import MapTR
 CAT_NAMES = {0: 'guide_line', 1: 'boundary'}
 GT_COLORS = {0: (0, 255, 0), 1: (0, 0, 255)}       # BGR: 中心线绿, 边界线红
 PRED_COLORS = {0: (255, 0, 0), 1: (255, 0, 0)}    # BGR: 所有预测线蓝色
+SEG_COLORS = [(0, 255, 0), (0, 0, 255)]             # BGR: seg mask 每类颜色
 
 
 def denormalize_lines(lines, roi_size):
     return lines * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
+
+
+def vectors_to_world(vec_dict, roi_size, pc_min_x, pc_min_y):
+    """归一化 vector → 世界坐标 dict-of-lists"""
+    out = {}
+    for cls_id, arr in vec_dict.items():
+        lines = []
+        for i in range(arr.shape[0]):
+            pts = arr[i, 0].cpu().numpy().copy()
+            pts[:, 0] = pts[:, 0] * roi_size[0] + pc_min_x
+            pts[:, 1] = pts[:, 1] * roi_size[1] + pc_min_y
+            lines.append(pts)
+        out[cls_id] = lines
+    return out
 
 
 def project_to_image(pts_3d, K, extr):
@@ -123,20 +138,40 @@ def draw_bev_panel(panel, pc_range, gt_lines, pred_lines):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
 
 
-def draw_mask_panel(panel, mask, title, flip_v=False):
-    """绘制分割掩码 (原始像素, INTER_NEAREST 缩放)"""
-    h, w = mask.shape[:2]  # (80, 160)
-    if flip_v:
-        mask = np.flip(mask, axis=0)
-    disp = (mask * 255).astype(np.uint8)
-    disp = cv2.resize(disp, (panel.shape[1], panel.shape[0]),
-                      interpolation=cv2.INTER_NEAREST)
-    bgr = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
-    green = np.full_like(bgr, (0, 255, 0), dtype=np.uint8)
-    panel[:] = np.where(bgr > 0, green, (25, 25, 25))
-    flip_tag = ' (flipped)' if flip_v else ''
-    cv2.putText(panel, f'{title}{flip_tag}  shape=({h},{w})', (8, 22),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+def draw_mask_panel(panel, mask, title, flip_v=False, colors=None):
+    """绘制分割掩码 (支持多通道彩色叠加, INTER_NEAREST 缩放)"""
+    if mask.ndim == 3 and mask.shape[0] > 1:
+        if colors is None:
+            colors = SEG_COLORS
+        h, w = mask.shape[1:]
+        panel[:] = (25, 25, 25)
+        occupied = np.zeros((panel.shape[0], panel.shape[1]), dtype=bool)
+        for c in range(mask.shape[0]):
+            ch = mask[c]
+            if flip_v:
+                ch = np.flip(ch, axis=0)
+            disp = cv2.resize(ch, (panel.shape[1], panel.shape[0]),
+                              interpolation=cv2.INTER_NEAREST)
+            new = (disp > 0) & ~occupied
+            for i in range(3):
+                panel[..., i][new] = colors[c][i]
+            occupied |= (disp > 0)
+        flip_tag = ' (flipped)' if flip_v else ''
+        cv2.putText(panel, f'{title}{flip_tag}  shape=({mask.shape[0]},{h},{w})', (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+    else:
+        h, w = mask.shape[:2]
+        if flip_v:
+            mask = np.flip(mask, axis=0)
+        disp = (mask * 255).astype(np.uint8)
+        disp = cv2.resize(disp, (panel.shape[1], panel.shape[0]),
+                          interpolation=cv2.INTER_NEAREST)
+        bgr = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
+        green = np.full_like(bgr, (0, 255, 0), dtype=np.uint8)
+        panel[:] = np.where(bgr > 0, green, (25, 25, 25))
+        flip_tag = ' (flipped)' if flip_v else ''
+        cv2.putText(panel, f'{title}{flip_tag}  shape=({h},{w})', (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
 
 def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
@@ -159,7 +194,7 @@ def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
         Ki = intrinsics[ci].cpu().numpy() if isinstance(intrinsics[ci], torch.Tensor) else intrinsics[ci]
         extri = extrinsics[ci].cpu().numpy() if isinstance(extrinsics[ci], torch.Tensor) else extrinsics[ci]
 
-        # GT 线（实线）
+        # GT 线 (guide_line 用箭头显示方向)
         for cls_id, lines in gt_lines.items():
             color = GT_COLORS.get(cls_id, (200, 200, 200))
             for pts_list in lines:
@@ -170,7 +205,12 @@ def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
                 if in_img.sum() < 2:
                     continue
                 uv_proj = uv[in_img].astype(np.int32)
-                cv2.polylines(img, [uv_proj], False, color, 2, lineType=cv2.LINE_AA)
+                if cls_id == 0:
+                    for i in range(len(uv_proj) - 1):
+                        cv2.arrowedLine(img, tuple(uv_proj[i]), tuple(uv_proj[i + 1]),
+                                        color, 2, tipLength=0.25)
+                else:
+                    cv2.polylines(img, [uv_proj], False, color, 2, lineType=cv2.LINE_AA)
                 cv2.circle(img, tuple(uv_proj[0]), 3, color, -1)
                 cv2.circle(img, tuple(uv_proj[-1]), 3, color, -1)
 
@@ -245,14 +285,15 @@ def infer():
 
         cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics)
 
-        gt_seg_mask = batch['semantic_mask'][0].numpy()  # (1, 80, 160)
-        pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (1, 80, 160)
+        gt_seg_mask = batch['semantic_mask'][0].numpy()  # (num_classes, 80, 160)
+        pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)
 
         pred_lines, pred_scores = decode_predictions(
             cls_scores[0], reg_preds[0], cfg.roi_size, cfg.pc_range, args.score_thresh)
 
         sample = ds.samples[batch_idx]
-        gt_raw = sample['map_geom']
+        gt_raw = vectors_to_world(
+            batch['vectors'][0], cfg.roi_size, cfg.pc_range[0], cfg.pc_range[1])
         cam_names = get_cam_names(sample)
 
         canvas = np.zeros((total_h, canvas_w, 3), dtype=np.uint8)
@@ -262,10 +303,10 @@ def infer():
 
         # GT 掩码面板 (需要 flip 对齐 BEV 坐标)
         draw_mask_panel(canvas[:ph, pw + gap:pw * 2 + gap],
-                        gt_seg_mask[0], 'GT Mask', flip_v=True)
+                        gt_seg_mask, 'GT Mask', flip_v=True)
 
-        # Pred 掩码面板 (已经是 BEV 坐标，不 flip, 按阈值二值化)
-        pred_binary = (pred_seg_mask[0] > args.seg_thresh).astype(np.float32)
+        # Pred 掩码面板 (已经是 BEV 坐标，不 flip)
+        pred_binary = (pred_seg_mask > args.seg_thresh).astype(np.float32)
         draw_mask_panel(canvas[:ph, pw * 2 + gap * 2:pw * 3 + gap * 2],
                         pred_binary, f'Pred Mask  >{args.seg_thresh}', flip_v=False)
 

@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 from shapely.geometry import LineString
 
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Set, Union
 
 
 def normalize_image(img: np.ndarray, mean: List[float], std: List[float]) -> np.ndarray:
@@ -32,13 +32,13 @@ def vectorize_map(
     roi_size: Tuple[float, float],
     num_points: int,
     normalize: bool = True,
-    permute: bool = True,
+    permute: Union[bool, Set[int]] = True,
     simplify_tol: float = 0.2,
 ) -> Dict:
     """将Shapely线 → 均匀采样的向量化点序列
 
     Args:
-        permute: 对每条开放线生成正向+反向两个方向 (方向歧义处理)
+        permute: bool或set。True=全类permute, {1}=仅boundary permute
     返回:
         {cls_id: (num_lines, num_permute, num_points, 2)}  每点归一化到[0,1]
     """
@@ -64,7 +64,8 @@ def vectorize_map(
                 sampled = sampled / np.array([roi_size[0], roi_size[1]], dtype=np.float32)
 
             # 4. 生成正向+反向两个排列 (开放线遍历方向歧义)
-            if permute:
+            should_permute = (cls_id in permute) if isinstance(permute, set) else permute
+            if should_permute:
                 line_permutes = [sampled, np.flip(sampled, axis=0)]
                 cls_vectors.append(np.stack(line_permutes, axis=0))
             else:
@@ -113,10 +114,10 @@ def rasterize_map(
 ) -> np.ndarray:
     """将向量化线绘制为分割掩码 (辅助监督用)"""
     h, w = canvas_size
-    sem_mask = np.zeros((1, h, w), dtype=np.uint8)
+    num_classes = max(vectors.keys()) + 1 if vectors else 1
+    sem_mask = np.zeros((num_classes, h, w), dtype=np.uint8)
 
     for cls_id, lines in vectors.items():
-        mask = np.zeros((h, w), dtype=np.uint8)
         for line in lines:
             pts_2d = line[0] if line.ndim == 3 else line
             denormalized = pts_2d * np.array([roi_size[0], roi_size[1]], dtype=np.float32)
@@ -130,8 +131,7 @@ def rasterize_map(
                 pts.append([px, py])
             pts = np.array(pts, dtype=np.int32)
             if len(pts) >= 2:
-                cv2.polylines(mask, [pts], False, 1, thickness=thickness)
-        sem_mask[0] = np.maximum(sem_mask[0], mask)
+                cv2.polylines(sem_mask[cls_id], [pts], False, 1, thickness=thickness)
     return sem_mask
 
 

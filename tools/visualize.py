@@ -13,6 +13,20 @@ CAT_NAMES = {0: 'guide_line', 1: 'boundary'}
 CAT_COLORS = {0: (0, 255, 0), 1: (0, 0, 255)}  # BGR
 
 
+def vectors_to_world(vec_dict, roi_size, pc_min_x, pc_min_y):
+    """归一化 vector → 世界坐标 dict-of-lists"""
+    out = {}
+    for cls_id, arr in vec_dict.items():
+        lines = []
+        for i in range(arr.shape[0]):
+            pts = arr[i, 0].copy()
+            pts[:, 0] = pts[:, 0] * roi_size[0] + pc_min_x
+            pts[:, 1] = pts[:, 1] * roi_size[1] + pc_min_y
+            lines.append(pts)
+        out[cls_id] = lines
+    return out
+
+
 def project_to_image(pts_3d, K, extr):
     """3D点(车辆坐标系) → 图像像素坐标"""
     if pts_3d.ndim == 2 and pts_3d.shape[1] == 2:
@@ -82,7 +96,12 @@ def render_heatmap_curve(soft_heatmap, vectors_raw, pc_range, save_path, idx, sc
             dx = ((pc_max_x - xy[:, 0]) / x_range * HM_H).astype(np.int32)
             dy = ((pc_max_y - xy[:, 1]) / y_range * HM_W).astype(np.int32)
             pix = np.stack([dy, dx], axis=1) + np.array([hm_left, hm_top])
-            cv2.polylines(canvas, [pix], False, color, 1, lineType=cv2.LINE_AA)
+            if cls_id == 0:
+                for i in range(len(pix) - 1):
+                    cv2.arrowedLine(canvas, tuple(pix[i]), tuple(pix[i + 1]),
+                                    color, 1, tipLength=0.25)
+            else:
+                cv2.polylines(canvas, [pix], False, color, 1, lineType=cv2.LINE_AA)
 
     for i, (d, row_i, sc) in enumerate(zip(slice_dists, slice_rows, slice_colors)):
         line_y = hm_top + int((160 - row_i) / 160 * HM_H)
@@ -187,7 +206,8 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         extrinsics = item['extrinsics']
         sem_mask = item.get('semantic_mask')
         soft_heatmap = item.get('soft_heatmap')
-        vectors_raw = sample['map_geom']
+        vectors_raw = vectors_to_world(
+            item['vectors'], cfg.roi_size, cfg.pc_range[0], cfg.pc_range[1])
 
         available_cams = sorted(k for k, v in sample['cams'].items() if v['img_fpath'] is not None)
 
@@ -214,7 +234,7 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         cv2.fillPoly(bev, [tri], (180, 180, 180))
         cv2.arrowedLine(bev, (ex, ey), (ex + 40, ey), (100, 100, 100), 2, tipLength=0.3)
 
-        # GT 线
+        # GT 线 (guide_line 用箭头显示方向, boundary 用实线)
         for cls_id, lines in vectors_raw.items():
             color = CAT_COLORS.get(cls_id, (200, 200, 200))
             for pts_list in lines:
@@ -225,7 +245,12 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
                 col = ((xy[:, 0] - pc_min_x) / x_range * BEV_W).astype(np.int32)
                 row = ((pc_max_y - xy[:, 1]) / y_range * BEV_H).astype(np.int32)
                 pix = np.stack([col, row], axis=1)
-                cv2.polylines(bev, [pix], False, color, 2, lineType=cv2.LINE_AA)
+                if cls_id == 0:
+                    for i in range(len(pix) - 1):
+                        cv2.arrowedLine(bev, tuple(pix[i]), tuple(pix[i + 1]),
+                                        color, 2, tipLength=0.25)
+                else:
+                    cv2.polylines(bev, [pix], False, color, 2, lineType=cv2.LINE_AA)
                 cv2.circle(bev, tuple(pix[0]), 4, color, -1)
                 cv2.circle(bev, tuple(pix[-1]), 4, color, -1)
 
@@ -240,14 +265,19 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         mask_panel = canvas[:BEV_H, BEV_W + GAP:BEV_W * 2 + GAP]
 
         if sem_mask is not None:
-            mask_raw = np.flip(sem_mask[0].numpy(), axis=0)
-            mask_disp = (mask_raw * 255).astype(np.uint8)
-            mask_disp = cv2.resize(mask_disp, (BEV_W, BEV_H),
-                                   interpolation=cv2.INTER_NEAREST)
-            mask_bgr = cv2.cvtColor(mask_disp, cv2.COLOR_GRAY2BGR)
-            green = np.full_like(mask_bgr, (0, 255, 0), dtype=np.uint8)
-            mask_panel[:] = np.where(mask_bgr > 0, green, (25, 25, 25))
-            cv2.putText(mask_panel, f'BEV Mask (5x nearest)  shape={list(mask_raw.shape)}', (10, 25),
+            sem_np = sem_mask.numpy()  # (num_classes, H, W)
+            mask_panel[:] = (25, 25, 25)
+            occupied = np.zeros((BEV_H, BEV_W), dtype=bool)
+            for c in range(sem_np.shape[0]):
+                ch = np.flip(sem_np[c], axis=0)
+                disp = cv2.resize(ch, (BEV_W, BEV_H),
+                                  interpolation=cv2.INTER_NEAREST)
+                new = (disp > 0) & ~occupied
+                color = CAT_COLORS.get(c, (200, 200, 200))
+                for i in range(3):
+                    mask_panel[..., i][new] = color[i]
+                occupied |= (disp > 0)
+            cv2.putText(mask_panel, f'BEV Mask (5x nearest)  shape={list(sem_np.shape)}', (10, 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
         else:
             mask_panel[:] = (25, 25, 25)
@@ -273,7 +303,7 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
             img = np.clip(img, 0, 255).astype(np.uint8)
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-            # 投影 GT 线
+            # 投影 GT 线 (guide_line 用箭头显示方向)
             Ki = intrinsics[ci]
             extri = extrinsics[ci]
             for cls_id, lines in vectors_raw.items():
@@ -288,8 +318,12 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
                     if in_img.sum() < 2:
                         continue
                     uv_proj = uv[in_img].astype(np.int32)
-                    for j in range(len(uv_proj) - 1):
-                        cv2.line(img, tuple(uv_proj[j]), tuple(uv_proj[j + 1]), color, 2)
+                    if cls_id == 0:
+                        for j in range(len(uv_proj) - 1):
+                            cv2.arrowedLine(img, tuple(uv_proj[j]), tuple(uv_proj[j + 1]),
+                                            color, 2, tipLength=0.25)
+                    else:
+                        cv2.polylines(img, [uv_proj], False, color, 2, lineType=cv2.LINE_AA)
                     cv2.circle(img, tuple(uv_proj[0]), 3, color, -1)
                     cv2.circle(img, tuple(uv_proj[-1]), 3, color, -1)
 

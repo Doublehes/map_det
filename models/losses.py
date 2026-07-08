@@ -171,7 +171,10 @@ class MapTRCriterion(nn.Module):
                     cls_lines = vec[cls_id]
                     for j in range(cls_lines.shape[0]):
                         labels.append(cls_id)
-                        lines.append(cls_lines[j].to(device).float())
+                        line = cls_lines[j].to(device).float()
+                        if line.shape[0] == 1:
+                            line = line.expand(2, -1, -1)
+                        lines.append(line)
                 if len(labels) == 0:
                     labels.append(0)
                     lines.append(torch.zeros((2, self.num_points, 2), device=device, dtype=torch.float))

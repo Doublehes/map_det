@@ -179,7 +179,7 @@ class MapTRDataset(Dataset):
             roi_size=self.cfg.roi_size,    # (40, 20)
             num_points=self.cfg.num_points, # 16
             normalize=True,
-            permute=True,
+            permute={1},  # 仅boundary做方向增强; guide_line保留原始方向
         )
         return vectors
 
