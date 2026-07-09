@@ -9,7 +9,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import (
+    CosineAnnealingLR, MultiStepLR, LinearLR, SequentialLR,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -84,8 +86,8 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
             line_loss = '' if seg_only else f'cls={loss_dict.get("cls_loss",0):.4f} reg={loss_dict.get("reg_loss",0):.4f} '
             log = (
                 f'[E {epoch+1}/{cfg.num_epochs}] [{batch_idx}/{len(loader)}] '
-                f'{_get_lr_str(optimizer)} '
                 f'ETA={eta/60:.0f}min '
+                f'{_get_lr_str(optimizer)} '
                 f'data_t={avg_data:.3f}s '
                 f'model_t={avg_model:.3f}s '
                 f'loss_total={loss.item():.4f} '
@@ -204,7 +206,27 @@ def main():
         print(f'[分割模式] decoder + head 已冻结, {frozen/1e6:.1f}M/{total/1e6:.1f}M 参数冻结')
 
     optimizer = build_optimizer(model, cfg)
-    scheduler = None
+
+    total_iters = cfg.num_epochs * len(train_loader)
+    if cfg.scheduler == 'none':
+        scheduler = None
+    else:
+        if cfg.scheduler == 'step':
+            milestones = [m * len(train_loader) for m in cfg.lr_milestones]
+            main_lr_scheduler = MultiStepLR(optimizer, milestones=milestones, gamma=cfg.lr_gamma)
+        else:
+            main_lr_scheduler = CosineAnnealingLR(
+                optimizer, T_max=total_iters - cfg.warmup_iters,
+                eta_min=cfg.lr * cfg.min_lr_ratio)
+
+        if cfg.warmup_iters > 0:
+            warmup_scheduler = LinearLR(
+                optimizer, start_factor=cfg.warmup_ratio, total_iters=cfg.warmup_iters)
+            scheduler = SequentialLR(
+                optimizer, [warmup_scheduler, main_lr_scheduler],
+                milestones=[cfg.warmup_iters])
+        else:
+            scheduler = main_lr_scheduler
 
     if args.resume and os.path.exists(args.resume):
         print(f'[恢复] 从 {args.resume} 恢复训练')
