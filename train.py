@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from configs.default import cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
-
+from eval import run_eval
+from utils.timer import Timer
 
 def _get_lr_str(optimizer):
     lrs = sorted(set(round(g['lr'], 8) for g in optimizer.param_groups))
@@ -144,6 +145,7 @@ def main():
     parser.add_argument('--freeze-backbone', action='store_true', help='冻结backbone只训练其余部分')
     parser.add_argument('--seg-only', action='store_true', help='仅训练分割头, 跳过线分类和回归')
     parser.add_argument('--epochs', type=int, default=None, help='覆盖 cfg.num_epochs')
+    parser.add_argument('--eval-interval', type=int, default=1, help='每 N 个 epoch 执行一次评测 (0=禁用)')
     args = parser.parse_args()
 
     print(f'[设备] {cfg.device}')
@@ -215,9 +217,18 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'[模型] 总参数: {total_params/1e6:.2f}M, 可训练: {trainable_params/1e6:.2f}M')
 
+    timer = Timer()
     for epoch in range(start_epoch, cfg.num_epochs):
         train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, epoch, cfg, seg_only=args.seg_only)
         save_checkpoint(model, optimizer, epoch, cfg, args.work_dir)
+
+        if not args.seg_only and args.eval_interval > 0 and (epoch + 1) % args.eval_interval == 0:
+            print(f'\n{"="*50}\n[评测] Epoch {epoch+1}')
+            model.eval()
+            with timer('评测整体'):
+                results, evaluator = run_eval(model, val_loader, cfg, n_workers=4)
+                evaluator.print_results(results)
+            model.train()
 
     print('[训练完成]')
 
