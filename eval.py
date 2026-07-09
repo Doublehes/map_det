@@ -9,7 +9,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from configs.default import cfg
+from configs.default import config_default as cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 from metrics.vector_eval import VectorEvaluate

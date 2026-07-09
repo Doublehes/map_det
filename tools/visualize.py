@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from configs.default import cfg
+from configs.default import config_default as cfg
 from data.dataset import MapTRDataset
 
 CAT_NAMES = {0: 'guide_line', 1: 'boundary'}

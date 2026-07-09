@@ -7,7 +7,7 @@ import numpy as np
 import cv2
 from torch.utils.data import DataLoader
 
-from configs.default import cfg
+from configs.default import config_default as cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 

@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from configs.default import cfg
+from configs.default import config_default as cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 

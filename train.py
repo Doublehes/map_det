@@ -15,7 +15,7 @@ from torch.optim.lr_scheduler import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from configs.default import cfg
+from configs.default import config_default as cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 from eval import run_eval
