@@ -191,6 +191,7 @@ class MapTRDataset(Dataset):
             canvas_size=self.cfg.canvas_size,  # (80, 160) = (H=行/Y, W=列/X)
             roi_size=self.cfg.roi_size,        # (40, 20)
             thickness=2,
+            num_classes=self.cfg.num_classes,
         )
         return torch.from_numpy(sem_mask).float()
 
