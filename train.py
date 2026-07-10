@@ -15,7 +15,6 @@ from torch.optim.lr_scheduler import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from configs.default import config_default as cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 from eval import run_eval
@@ -147,8 +146,12 @@ def main():
     parser.add_argument('--freeze-backbone', action='store_true', help='冻结backbone只训练其余部分')
     parser.add_argument('--seg-only', action='store_true', help='仅训练分割头, 跳过线分类和回归')
     parser.add_argument('--epochs', type=int, default=None, help='覆盖 cfg.num_epochs')
+    parser.add_argument('config', type=str, help='配置文件路径')
     parser.add_argument('--eval-interval', type=int, default=1, help='每 N 个 epoch 执行一次评测 (0=禁用)')
     args = parser.parse_args()
+
+    from configs.loader import load_config
+    cfg = load_config(args.config)
 
     print(f'[设备] {cfg.device}')
     print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.data.batch_size}')

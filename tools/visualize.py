@@ -6,8 +6,9 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from configs.default import config_default as cfg
 from data.dataset import MapTRDataset
+
+cfg = None
 
 CAT_NAMES = {0: 'guide_line', 1: 'boundary'}
 CAT_COLORS = {0: (0, 255, 0), 1: (0, 0, 255)}  # BGR
@@ -351,6 +352,7 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='MapTR数据可视化 (OpenCV)')
+    parser.add_argument('config', type=str, help='配置文件路径')
     parser.add_argument('--indices', type=int, nargs='+', default=[0, 1, 2],
                         help='要可视化的样本索引')
     parser.add_argument('--save-dir', type=str, default='work_dirs/vis',
@@ -358,4 +360,8 @@ if __name__ == '__main__':
     parser.add_argument('--is-train', action='store_true', default=False,
                         help='使用训练模式 (包含分割掩码)')
     args = parser.parse_args()
+
+    from configs.loader import load_config
+    cfg = load_config(args.config)
+
     visualize_sample(args.indices, args.save_dir, args.is_train)

@@ -8,8 +8,9 @@ import torch
 from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from configs.default import config_default as cfg
 from data.dataset import MapTRDataset, collate_fn
+
+cfg = None
 from models.maptr import MapTR
 
 CAT_NAMES = {0: 'guide_line', 1: 'boundary'}
@@ -244,6 +245,7 @@ def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
 def infer():
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument('config', type=str, help='配置文件路径')
     parser.add_argument('--checkpoint', type=str, default='work_dirs/maptr/epoch_4.pth')
     parser.add_argument('--save-dir', type=str, default='work_dirs/infer')
     parser.add_argument('--num-samples', type=int, default=10)
@@ -251,6 +253,10 @@ def infer():
     parser.add_argument('--seg-thresh', type=float, default=0.4,
                         help='预测分割掩码二值化阈值')
     args = parser.parse_args()
+
+    global cfg
+    from configs.loader import load_config
+    cfg = load_config(args.config)
 
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)

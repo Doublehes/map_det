@@ -9,7 +9,6 @@ import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from configs.default import config_default as cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 from metrics.vector_eval import VectorEvaluate
@@ -93,12 +92,16 @@ def main():
     timer = Timer()
 
     parser = argparse.ArgumentParser(description='MapTR 评测')
+    parser.add_argument('config', type=str, help='配置文件路径')
     parser.add_argument('--checkpoint', type=str, required=True, help='模型 checkpoint 路径')
     parser.add_argument('--score-thr', type=float, default=None, help='置信度阈值 (默认 cfg.score_thr)')
     parser.add_argument('--batch-size', type=int, default=None, help='推理 batch size')
     parser.add_argument('--num-workers', type=int, default=None, help='dataloader workers')
     parser.add_argument('--device', type=str, default=None, help='推理设备')
     args = parser.parse_args()
+
+    from configs.loader import load_config
+    cfg = load_config(args.config)
 
     device = torch.device(args.device) if args.device else cfg.device
     score_thr = args.score_thr if args.score_thr is not None else cfg.score_thr
