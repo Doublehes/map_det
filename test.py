@@ -28,7 +28,7 @@ def visualize_prediction(imgs, cls_scores, reg_preds, idx, save_dir, roi_size):
     B = imgs.shape[0]
     for bi in range(min(B, 4)):
         img = imgs[bi, 0].cpu().permute(1, 2, 0).numpy()
-        img = (img * np.array(cfg.img_norm['std']) + np.array(cfg.img_norm['mean']))
+        img = (img * np.array(cfg.data.img_norm['std']) + np.array(cfg.data.img_norm['mean']))
         img = np.clip(img, 0, 255).astype(np.uint8)
 
         scores = cls_scores[bi].sigmoid().cpu().numpy()
@@ -67,10 +67,10 @@ def test():
     save_dir = './work_dirs/maptr/test_viz'
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    ds = MapTRDataset(cfg.val_ann_file, cfg.data_root, cfg, is_train=False)
+    ds = MapTRDataset(cfg.data.val_ann_file, cfg.data.data_root, cfg.data, is_train=False)
     loader = DataLoader(ds, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn)
 
-    model = MapTR(cfg).to(cfg.device)
+    model = MapTR(cfg.model).to(cfg.device)
     model.eval()
 
     for batch_idx, batch in enumerate(loader):
@@ -83,7 +83,7 @@ def test():
 
         cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics)
 
-        visualize_prediction(imgs, cls_scores, reg_preds, batch_idx, save_dir, cfg.roi_size)
+        visualize_prediction(imgs, cls_scores, reg_preds, batch_idx, save_dir, cfg.data.roi_size)
         print(f'[批次 {batch_idx}] 完成')
 
     print(f'[测试完成] 结果保存在 {save_dir}')

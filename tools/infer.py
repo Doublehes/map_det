@@ -74,8 +74,8 @@ def decode_predictions(cls_scores, reg_preds, roi_size, pc_range, score_thresh=0
 def get_cam_names(sample):
     # available = sorted(k for k, v in sample['cams'].items() if v['img_fpath'] is not None)
     available = [k for k, v in sample['cams'].items() if v['img_fpath'] is not None]
-    cam_names = list(available) + ['dummy'] * max(0, cfg.num_cams - len(available))
-    return cam_names[:cfg.num_cams]
+    cam_names = list(available) + ['dummy'] * max(0, cfg.data.num_cams - len(available))
+    return cam_names[:cfg.data.num_cams]
 
 
 def world_to_panel(pts, pc_min_x, pc_min_y, pc_max_x, pc_max_y, pw, ph):
@@ -176,11 +176,11 @@ def draw_mask_panel(panel, mask, title, flip_v=False, colors=None):
 
 def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
                     cam_names, start_y, cam_w, cam_h, gap):
-    mean = np.array(cfg.img_norm['mean'], dtype=np.float32)
-    std = np.array(cfg.img_norm['std'], dtype=np.float32)
-    img_w, img_h = cfg.img_w, cfg.img_h
+    mean = np.array(cfg.data.img_norm['mean'], dtype=np.float32)
+    std = np.array(cfg.data.img_norm['std'], dtype=np.float32)
+    img_w, img_h = cfg.data.img_w, cfg.data.img_h
 
-    for ci in range(min(len(cam_names), cfg.num_cams)):
+    for ci in range(min(len(cam_names), cfg.data.num_cams)):
         row = ci // 3
         col = ci % 3
         cx = col * (cam_w + gap)
@@ -255,10 +255,10 @@ def infer():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    ds = MapTRDataset(cfg.val_ann_file, cfg.data_root, cfg, is_train=False)
+    ds = MapTRDataset(cfg.data.val_ann_file, cfg.data.data_root, cfg.data, is_train=False)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=collate_fn)
 
-    model = MapTR(cfg).to(cfg.device)
+    model = MapTR(cfg.model).to(cfg.device)
     ckpt = torch.load(args.checkpoint, map_location=cfg.device)
     model.load_state_dict(ckpt['model_state_dict'])
     model.eval()
@@ -289,17 +289,17 @@ def infer():
         pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)
 
         pred_lines, pred_scores = decode_predictions(
-            cls_scores[0], reg_preds[0], cfg.roi_size, cfg.pc_range, args.score_thresh)
+            cls_scores[0], reg_preds[0], cfg.data.roi_size, cfg.data.pc_range, args.score_thresh)
 
         sample = ds.samples[batch_idx]
         gt_raw = vectors_to_world(
-            batch['vectors'][0], cfg.roi_size, cfg.pc_range[0], cfg.pc_range[1])
+            batch['vectors'][0], cfg.data.roi_size, cfg.data.pc_range[0], cfg.data.pc_range[1])
         cam_names = get_cam_names(sample)
 
         canvas = np.zeros((total_h, canvas_w, 3), dtype=np.uint8)
 
         # BEV 面板
-        draw_bev_panel(canvas[:ph, :pw], cfg.pc_range, gt_raw, pred_lines)
+        draw_bev_panel(canvas[:ph, :pw], cfg.data.pc_range, gt_raw, pred_lines)
 
         # GT 掩码面板 (需要 flip 对齐 BEV 坐标)
         draw_mask_panel(canvas[:ph, pw + gap:pw * 2 + gap],

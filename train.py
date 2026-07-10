@@ -151,42 +151,42 @@ def main():
     args = parser.parse_args()
 
     print(f'[设备] {cfg.device}')
-    print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.batch_size}, lr={cfg.lr}')
-    print(f'[数据] train={cfg.train_ann_file}')
+    print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.data.batch_size}')
+    print(f'[数据] train={cfg.data.train_ann_file}')
 
     train_dataset = MapTRDataset(
-        ann_file=cfg.train_ann_file,
-        data_root=cfg.data_root,
-        cfg=cfg,
+        ann_file=cfg.data.train_ann_file,
+        data_root=cfg.data.data_root,
+        cfg=cfg.data,
         is_train=True,
     )
 
     val_dataset = MapTRDataset(
-        ann_file=cfg.val_ann_file,
-        data_root=cfg.data_root,
-        cfg=cfg,
+        ann_file=cfg.data.val_ann_file,
+        data_root=cfg.data.data_root,
+        cfg=cfg.data,
         is_train=False,
     )
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=cfg.batch_size,
+        batch_size=cfg.data.batch_size,
         shuffle=True,
-        num_workers=cfg.num_workers,
+        num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         drop_last=True,
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=cfg.batch_size,
+        batch_size=cfg.data.batch_size,
         shuffle=False,
-        num_workers=cfg.num_workers,
+        num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         drop_last=False,
     )
 
-    model = MapTR(cfg).to(cfg.device)
+    model = MapTR(cfg.model).to(cfg.device)
     # model.bev_encoder.debug_dir = "./debug_bev_porj"
     # print(model)
     start_epoch = 0

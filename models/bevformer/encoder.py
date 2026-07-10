@@ -97,15 +97,8 @@ def point_sampling(ref_3d, pc_range, intrinsics, extrinsics, img_h, img_w):
 class BEVFormerLayer(nn.Module):
     """BEVFormer 单层编码器: deformable self-attn + cross-attn + FFN (pre-norm)"""
 
-    def __init__(self, cfg):
+    def __init__(self, embed_dims, num_heads, num_levels, num_points, dropout, ffn_channels, num_cams):
         super().__init__()
-        embed_dims = cfg.bev_embed_dims
-        num_heads = cfg.num_heads
-        num_levels = cfg.num_feat_levels
-        num_points = cfg.num_sampling_points
-        dropout = cfg.dropout
-        ffn_channels = cfg.ffn_channels
-
         self.self_attn = MSDeformableAttention3D(
             embed_dims=embed_dims, num_heads=num_heads,
             num_levels=1, num_points=num_points,
@@ -117,7 +110,7 @@ class BEVFormerLayer(nn.Module):
             num_levels=num_levels, num_points=num_points,
             dropout=dropout, batch_first=True)
         self.cross_attn = SpatialCrossAttention(
-            embed_dims=embed_dims, num_cams=cfg.num_cams,
+            embed_dims=embed_dims, num_cams=num_cams,
             dropout=dropout, batch_first=True,
             deformable_attention=ms_deform_attn)
         self.norm2 = nn.LayerNorm(embed_dims)
@@ -188,8 +181,21 @@ class BEVFormerEncoder(nn.Module):
         self.cams_embeds = nn.Parameter(torch.Tensor(self.num_cams, self.embed_dims))
 
         self.layers = nn.ModuleList([
-            BEVFormerLayer(cfg) for _ in range(cfg.bevformer_num_layers)
+            BEVFormerLayer(
+                embed_dims=self.embed_dims,
+                num_heads=cfg.num_heads,
+                num_levels=self.num_feat_levels,
+                num_points=cfg.num_sampling_points,
+                dropout=cfg.dropout,
+                ffn_channels=cfg.ffn_channels,
+                num_cams=self.num_cams) for _ in range(cfg.num_layers)
         ])
+
+        self.input_proj = nn.Sequential(
+            nn.Conv2d(cfg.fpn_out_channels, self.embed_dims, kernel_size=1),
+            nn.BatchNorm2d(self.embed_dims),
+            nn.ReLU(inplace=True),
+        )
 
         self.debug_dir = None
 
@@ -213,6 +219,8 @@ class BEVFormerEncoder(nn.Module):
         Returns:
             bev_feat: (B, C, bev_h, bev_w)
         """
+        img_feats = [self.input_proj(f) for f in img_feats]
+        
         B = img_feats[0].shape[0] // self.num_cams
         device = img_feats[0].device
         dtype = img_feats[0].dtype

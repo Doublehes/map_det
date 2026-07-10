@@ -36,8 +36,8 @@ def run_eval(model, val_loader, cfg, score_thr=None, device=None, n_workers=4):
     if device is None:
         device = cfg.device
 
-    roi_w, roi_h = cfg.roi_size
-    pc0, pc1 = cfg.pc_range[0], cfg.pc_range[1]
+    roi_w, roi_h = cfg.data.roi_size
+    pc0, pc1 = cfg.data.pc_range[0], cfg.data.pc_range[1]
 
     predictions = {}
     for batch in tqdm(val_loader, desc='推理', unit='batch'):
@@ -101,18 +101,18 @@ def main():
     args = parser.parse_args()
 
     device = torch.device(args.device) if args.device else cfg.device
-    score_thr = args.score_thr if args.score_thr is not None else getattr(cfg, 'score_thr', 0.3)
-    batch_size = args.batch_size if args.batch_size else cfg.batch_size
+    score_thr = args.score_thr if args.score_thr is not None else cfg.score_thr
+    batch_size = args.batch_size if args.batch_size else cfg.data.batch_size
 
     print(f'[设备] {device}')
     print(f'[score_thr] {score_thr}')
-    print(f'[数据] val={cfg.val_ann_file}')
+    print(f'[数据] val={cfg.data.val_ann_file}')
 
     with timer('数据集加载'):
         val_dataset = MapTRDataset(
-            ann_file=cfg.val_ann_file,
-            data_root=cfg.data_root,
-            cfg=cfg,
+            ann_file=cfg.data.val_ann_file,
+            data_root=cfg.data.data_root,
+            cfg=cfg.data,
             is_train=False,
         )
 
@@ -120,13 +120,13 @@ def main():
             val_dataset,
             batch_size=batch_size,
             shuffle=False,
-            num_workers=args.num_workers or cfg.num_workers,
+            num_workers=args.num_workers or cfg.data.num_workers,
             collate_fn=collate_fn,
             drop_last=False,
         )
 
     with timer('模型加载'):
-        model = MapTR(cfg).to(device)
+        model = MapTR(cfg.model).to(device)
         print(f'[模型] 加载 checkpoint: {args.checkpoint}')
         checkpoint = torch.load(args.checkpoint, map_location=device)
         state_dict = checkpoint.get('model_state_dict', checkpoint)

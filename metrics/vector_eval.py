@@ -18,10 +18,10 @@ class VectorEvaluate:
     def __init__(self, cfg, n_workers=0):
         self.cfg = cfg
         self.n_workers = n_workers
-        self.cat2id = cfg.cat2id
+        self.cat2id = cfg.data.cat2id
         self.id2cat = {v: k for k, v in self.cat2id.items()}
-        self.roi_size = cfg.roi_size
-        self.pc_range = cfg.pc_range
+        self.roi_size = cfg.data.roi_size
+        self.pc_range = cfg.data.pc_range
         self.thresholds = getattr(cfg, 'eval_thresholds', THRESHOLDS)
         self.gts = {}
         self._prepare_gts_done = False
@@ -33,7 +33,7 @@ class VectorEvaluate:
         return lines
 
     def prepare_gts(self, dataset):
-        ann_path = self.cfg.val_ann_file
+        ann_path = self.cfg.data.val_ann_file
         pkl_name = Path(ann_path).stem
         cache_dir = Path('./work_dirs')
         cache_dir.mkdir(parents=True, exist_ok=True)

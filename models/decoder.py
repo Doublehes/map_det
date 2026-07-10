@@ -76,13 +76,13 @@ class MapTransformerLayer(nn.Module):
         return query
 
 
-class MapTransformerDecoderNew(nn.Module):
+class MapTransformerDecoder(nn.Module):
     """Decoder with reference point iteration (1 layer)."""
 
     def __init__(self, cfg):
         super().__init__()
         self.layers = nn.ModuleList([
-            MapTransformerLayer(cfg) for _ in range(cfg.decoder_num_layers)
+            MapTransformerLayer(cfg) for _ in range(cfg.num_decoder_layers)
         ])
 
     def forward(self, query, key, value, reference_points,

@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .decoder import MapTransformerDecoderNew
+from .decoder import MapTransformerDecoder
 
 
 class SinePositionalEncoding(nn.Module):
@@ -54,7 +54,7 @@ class MapTRHead(nn.Module):
         self.reference_points_embed = nn.Linear(self.embed_dims, self.num_points * 2)
 
         # decoder
-        self.transformer = MapTransformerDecoderNew(cfg)
+        self.transformer = MapTransformerDecoder(cfg)
 
         # prediction heads (one per decoder layer, shared since different_heads=False)
         cls_branch = nn.Linear(self.embed_dims, self.num_classes)
@@ -67,7 +67,7 @@ class MapTRHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(self.embed_dims * 2, self.num_points * 2),
         )
-        num_layers = cfg.decoder_num_layers
+        num_layers = cfg.num_decoder_layers
         self.cls_branches = nn.ModuleList([cls_branch for _ in range(num_layers)])
         self.reg_branches = nn.ModuleList([reg_branch for _ in range(num_layers)])
 
@@ -138,9 +138,6 @@ class MapSegHead(nn.Module):
         super().__init__()
         self.in_channels = cfg.bev_embed_dims
         self.embed_dims = cfg.bev_embed_dims
-        self.canvas_size = cfg.canvas_size
-        self.bev_h = cfg.bev_h
-        self.bev_w = cfg.bev_w
         self.num_classes = cfg.num_classes
 
         self.conv_in = nn.Conv2d(self.in_channels, self.embed_dims, kernel_size=3, padding=1, bias=False)
