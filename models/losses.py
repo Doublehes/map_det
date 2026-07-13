@@ -148,6 +148,7 @@ class MapTRCriterion(nn.Module):
         self.loss_reg_weight = cfg.loss_reg_weight
         self.loss_seg_weight = cfg.loss_seg_weight
         self.loss_dice_weight = cfg.loss_dice_weight
+        self.loss_heatmap_weight = cfg.loss_heatmap_weight
         self.focal_gamma = cfg.focal_gamma
         self.focal_alpha = cfg.focal_alpha
         self.l1_beta = cfg.l1_beta
@@ -155,7 +156,8 @@ class MapTRCriterion(nn.Module):
         self.mask_focal_loss = MaskFocalLoss(loss_weight=1.0, gamma=cfg.focal_gamma, alpha=cfg.focal_alpha)
         self.mask_dice_loss = MaskDiceLoss(loss_weight=1.0)
 
-    def forward(self, cls_scores, reg_preds, gt_vectors, gt_semantic_mask=None, seg_preds=None, seg_only=False):
+    def forward(self, cls_scores, reg_preds, gt_vectors, gt_semantic_mask=None, seg_preds=None,
+                gt_heatmap=None, heatmap_pred=None, seg_only=False):
         loss_dict = {}
 
         if not seg_only:
@@ -231,5 +233,10 @@ class MapTRCriterion(nn.Module):
         if seg_preds is not None and gt_semantic_mask is not None:
             loss_dict['seg_loss'] = self.loss_seg_weight * self.mask_focal_loss(seg_preds, gt_semantic_mask)
             loss_dict['dice_loss'] = self.loss_dice_weight * self.mask_dice_loss(seg_preds, gt_semantic_mask)
+
+        # 5. 热力图损失
+        if heatmap_pred is not None and gt_heatmap is not None:
+            loss_dict['heatmap_loss'] = self.loss_heatmap_weight * F.mse_loss(
+                heatmap_pred.sigmoid(), gt_heatmap.to(heatmap_pred.device))
 
         return loss_dict

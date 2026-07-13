@@ -41,7 +41,7 @@ def build_optimizer(model, cfg):
 
 def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=False):
     model.train()
-    total_loss = total_cls_loss = total_reg_loss = total_seg_loss = 0.0
+    total_loss = total_cls_loss = total_reg_loss = total_seg_loss = total_heatmap_loss = 0.0
 
     data_times, model_times = [], []
     epoch_start = time.time()
@@ -54,11 +54,11 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         t_model = time.time()
-        cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics, seg_only=seg_only)
+        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics, seg_only=seg_only)
 
         batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
 
-        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, seg_only=seg_only)
+        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, seg_only=seg_only, heatmap_pred=heatmap_pred)
         loss = sum(loss_dict.values())
 
         optimizer.zero_grad()
@@ -74,6 +74,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
         total_cls_loss += loss_dict.get('cls_loss', torch.tensor(0.0)).item()
         total_reg_loss += loss_dict.get('reg_loss', torch.tensor(0.0)).item()
         total_seg_loss += loss_dict.get('seg_loss', torch.tensor(0.0)).item() + loss_dict.get('dice_loss', torch.tensor(0.0)).item()
+        total_heatmap_loss += loss_dict.get('heatmap_loss', torch.tensor(0.0)).item()
 
         if batch_idx % 50 == 0:
             avg_data = sum(data_times[-50:]) / min(len(data_times), 50)
@@ -89,9 +90,10 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
                 f'{_get_lr_str(optimizer)} '
                 f'data_t={avg_data:.3f}s '
                 f'model_t={avg_model:.3f}s '
-                f'loss_total={loss.item():.4f} '
+                f'loss={loss.item():.4f} '
                 f'{line_loss}'
                 f'seg={loss_dict.get("seg_loss",0):.4f}+{loss_dict.get("dice_loss",0):.4f} '
+                f'heat={loss_dict.get("heatmap_loss",0):.4f} '
             )
             print(log)
 

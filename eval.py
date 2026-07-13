@@ -45,7 +45,7 @@ def run_eval(model, val_loader, cfg, score_thr=None, device=None, n_workers=4):
         extrinsics = batch['extrinsics'].to(device)
         tokens = batch['token']
 
-        cls_scores, reg_preds, _ = model(imgs, intrinsics, extrinsics)
+        cls_scores, reg_preds, _, _ = model(imgs, intrinsics, extrinsics)
 
         B = cls_scores.shape[0]
         for bi in range(B):

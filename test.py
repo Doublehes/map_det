@@ -41,7 +41,7 @@ def test():
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
 
-        cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics)
+        cls_scores, reg_preds, seg_preds, _ = model(imgs, intrinsics, extrinsics)
 
         visualize_prediction(imgs, cls_scores, reg_preds, batch_idx, save_dir, cfg.data.roi_size)
         print(f'[批次 {batch_idx}] 完成')

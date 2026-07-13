@@ -289,7 +289,7 @@ def infer():
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
 
-        cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics)
+        cls_scores, reg_preds, seg_preds, _ = model(imgs, intrinsics, extrinsics)
 
         gt_seg_mask = batch['semantic_mask'][0].numpy()  # (num_classes, 80, 160)
         pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)

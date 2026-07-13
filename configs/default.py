@@ -109,15 +109,21 @@ model = AttrDict({
         'ffn_channels': 512,
     }),
     'map_seg_head': AttrDict({
+        'enabled': True,
         'type': 'mapseg',
         'bev_embed_dims': bev_embed_dims,
         'num_classes': num_classes,
+    }),
+    'heatmap_head': AttrDict({
+        'enabled': True,
+        'bev_embed_dims': bev_embed_dims,
     }),
     'loss': AttrDict({
         'loss_cls_weight': 5.0,
         'loss_reg_weight': 50.0,
         'loss_seg_weight': 10.0,
         'loss_dice_weight': 1.0,
+        'loss_heatmap_weight': 1.0,
         'focal_gamma': 2.0,
         'focal_alpha': 0.25,
         'l1_beta': 0.01,

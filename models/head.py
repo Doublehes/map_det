@@ -158,3 +158,19 @@ class MapSegHead(nn.Module):
     def forward(self, bev_feat):
         x = self.relu(self.conv_in(bev_feat))
         return self.upsample(x)
+
+
+class BEVHeatMapHead(nn.Module):
+    """热力图预测头: 从BEV特征回归连续热力图 (B, 1, 80, 160)"""
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.conv_in = nn.Conv2d(cfg.bev_embed_dims, 128, kernel_size=3, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+        self.conv_out = nn.Conv2d(128, 1, kernel_size=1)
+
+    def forward(self, bev_feat):
+        x = self.relu(self.conv_in(bev_feat))
+        x = self.upsample(x)
+        return self.conv_out(x)
