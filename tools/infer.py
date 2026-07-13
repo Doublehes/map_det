@@ -241,6 +241,148 @@ def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
 
 
+def render_heatmap_pair(gt_heatmap, pred_heatmap, gt_lines, pred_lines,
+                        pc_range, save_path, idx, score_thresh,
+                        max_sigma=5.0):
+    """保存 GT vs Pred 热力图对比 + 剖面曲线 (双栏, 每栏结构与 visualize.py 一致)
+
+    Layout per panel:
+        Top: heatmap 顺时针旋转90° (前向朝下, 左侧在左)
+             横线标注 1/4(x=0m,青), 1/2(x=10m,黄), 3/4(x=20m,品红)
+        Bottom: 3条横截面曲线, X轴与热力图左右对齐
+        Info bar
+    """
+    pc_min_x, pc_min_y, _, pc_max_x, pc_max_y, _ = pc_range
+    x_range = pc_max_x - pc_min_x
+    y_range = pc_max_y - pc_min_y
+
+    slice_dists = [0.0, 10.0, 20.0]
+    slice_colors = [(255, 255, 0), (0, 255, 255), (255, 0, 255)]
+    slice_rows = [int((d - pc_min_x) / x_range * 160) for d in slice_dists]
+
+    Y_LABEL_W = 70
+    mr = 20
+    HM_W, HM_H = 360, 720
+    CV_H = 220
+    INFO_H = 30
+    MARGIN = 10
+    GAP = 20
+    PANEL_GAP = 40
+    panel_W = MARGIN + Y_LABEL_W + HM_W + mr + MARGIN
+    total_W = panel_W * 2 + PANEL_GAP
+    total_H = MARGIN + HM_H + GAP + CV_H + GAP + INFO_H
+
+    canvas = np.zeros((total_H, total_W, 3), dtype=np.uint8)
+
+    for panel_idx, (heat, lines_dict, title_prefix, color_map) in enumerate([
+        (gt_heatmap, gt_lines, 'GT', GT_COLORS),
+        (pred_heatmap, pred_lines, 'Pred', PRED_COLORS),
+    ]):
+        panel_off = panel_idx * (panel_W + PANEL_GAP)
+        hm_left = panel_off + MARGIN + Y_LABEL_W
+        hm_top = MARGIN
+
+        heat_rot = heat.T[::-1, ::-1]
+        hm_rows, hm_cols = heat_rot.shape
+
+        # ===== Top: rotated heatmap =====
+        hm_raw = (heat_rot * 255).astype(np.uint8)
+        hm_big = cv2.resize(hm_raw, (HM_W, HM_H), interpolation=cv2.INTER_LINEAR)
+        hm_color = cv2.applyColorMap(hm_big, cv2.COLORMAP_JET)
+        canvas[hm_top:hm_top + HM_H, hm_left:hm_left + HM_W] = hm_color
+
+        for cls_id, lines in lines_dict.items():
+            color = color_map.get(cls_id, (200, 200, 200))
+            for pts_list in lines:
+                pts = np.array(pts_list, dtype=np.float32)
+                if pts.shape[1] < 2:
+                    continue
+                xy = pts[:, :2]
+                dx = ((pc_max_x - xy[:, 0]) / x_range * HM_H).astype(np.int32)
+                dy = ((pc_max_y - xy[:, 1]) / y_range * HM_W).astype(np.int32)
+                pix = np.stack([dy, dx], axis=1) + np.array([hm_left, hm_top])
+                if cls_id == 0:
+                    for i in range(len(pix) - 1):
+                        cv2.arrowedLine(canvas, tuple(pix[i]), tuple(pix[i + 1]),
+                                        color, 1, tipLength=0.25)
+                else:
+                    cv2.polylines(canvas, [pix], False, color, 1, lineType=cv2.LINE_AA)
+
+        for i, (d, row_i, sc) in enumerate(zip(slice_dists, slice_rows, slice_colors)):
+            line_y = hm_top + int((160 - row_i) / 160 * HM_H)
+            for x in range(hm_left, hm_left + HM_W, 8):
+                cv2.line(canvas, (x, line_y), (min(x + 4, hm_left + HM_W - 1), line_y), sc, 2)
+            label = f'x={d:.0f}m'
+            cv2.putText(canvas, label, (hm_left + HM_W - 70, line_y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, sc, 1)
+
+        cv2.putText(canvas, f'{title_prefix} Heatmap (rotated)  idx={idx}',
+                    (hm_left + 5, hm_top + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(canvas, 'front (x=30m)',
+                    (hm_left + HM_W // 2 - 45, hm_top + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        cv2.putText(canvas, 'rear (x=-10m)',
+                    (hm_left + HM_W // 2 - 45, hm_top + HM_H - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+        # ===== Bottom: cross-section curves =====
+        cv_top = MARGIN + HM_H + GAP
+        mt, mb = 30, 45
+        ph = CV_H - mt - mb
+        pw = HM_W
+
+        bg_left = hm_left
+        bg_right = hm_left + HM_W
+        cv2.rectangle(canvas, (bg_left, cv_top), (bg_right, cv_top + CV_H), (25, 25, 25), -1)
+
+        for val, label in [(0.0, '0.0'), (0.25, ''), (0.5, '0.5'), (0.75, ''), (1.0, '1.0')]:
+            gy = cv_top + mt + int((1.0 - val) * ph)
+            cv2.line(canvas, (bg_left, gy), (bg_right, gy), (40, 40, 40), 1)
+            if label:
+                cv2.putText(canvas, label, (panel_off + MARGIN + 2, gy + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+
+        for label, frac in [('left', 0), ('-5', 0.25), ('0', 0.5), ('5', 0.75), ('right', 1.0)]:
+            gx = bg_left + int(frac * pw)
+            cv2.line(canvas, (gx, cv_top + mt + ph), (gx, cv_top + mt + ph + 6), (80, 80, 80), 1)
+            cv2.putText(canvas, label, (gx - 12, cv_top + mt + ph + 19),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 160, 160), 1)
+
+        cv2.putText(canvas, f'{title_prefix} Cross-Section Profiles',
+                    (bg_left + 5, cv_top + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+
+        for i, (d, row_i, sc) in enumerate(zip(slice_dists, slice_rows, slice_colors)):
+            flip_row = np.clip(159 - row_i, 0, 159)
+            vals = heat_rot[flip_row, :]
+            pts = []
+            for ci in range(hm_cols):
+                v = vals[ci]
+                cx = bg_left + int(ci / (hm_cols - 1) * pw)
+                cy = cv_top + mt + int((1.0 - v) * ph)
+                cy = int(np.clip(cy, cv_top + mt, cv_top + mt + ph))
+                pts.append((cx, cy))
+
+            for j in range(len(pts) - 1):
+                cv2.line(canvas, pts[j], pts[j + 1], sc, 2, lineType=cv2.LINE_AA)
+
+            mid_ci = hm_cols // 2
+            cv2.circle(canvas, pts[mid_ci], 4, sc, -1)
+
+        center_vals = [heat_rot[np.clip(159 - ri, 0, 159), hm_cols // 2] for ri in slice_rows]
+        legend_y = cv_top + mt + ph + 22
+        for i, (d, sc, cv_mid) in enumerate(zip(slice_dists, slice_colors, center_vals)):
+            lx = bg_left + i * (pw // 3)
+            cv2.line(canvas, (lx, legend_y), (lx + 25, legend_y), sc, 2)
+            cv2.putText(canvas, f'x={d:.0f}m  c={cv_mid:.3f}',
+                        (lx + 30, legend_y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, sc, 1)
+
+    # ===== Info bar =====
+    info_y = MARGIN + HM_H + GAP + CV_H + GAP
+    cv2.putText(canvas[info_y:],
+                f'params: adaptive Gaussian  max_sigma={max_sigma:.1f}m  score>{score_thresh}',
+                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+
+    cv2.imwrite(str(save_path), canvas)
+
+
 @torch.no_grad()
 def infer():
     import argparse
@@ -289,10 +431,12 @@ def infer():
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
 
-        cls_scores, reg_preds, seg_preds, _ = model(imgs, intrinsics, extrinsics)
+        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics)
 
         gt_seg_mask = batch['semantic_mask'][0].numpy()  # (num_classes, 80, 160)
         pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)
+        gt_heatmap = batch['soft_heatmap'][0].numpy()            # (1, 80, 160)
+        pred_heatmap = heatmap_pred[0].sigmoid().cpu().numpy()    # (1, 80, 160)
 
         pred_lines, pred_scores = decode_predictions(
             cls_scores[0], reg_preds[0], cfg.data.roi_size, cfg.data.pc_range, args.score_thresh)
@@ -329,6 +473,20 @@ def infer():
         out = save_dir / f'infer_{batch_idx:04d}.png'
         cv2.imwrite(str(out), canvas)
         print(f'[保存] {out}')
+
+        heat_out = save_dir / f'infer_{batch_idx:04d}_heatmap.png'
+        render_heatmap_pair(
+            gt_heatmap=gt_heatmap[0],
+            pred_heatmap=pred_heatmap[0],
+            gt_lines=gt_raw,
+            pred_lines=pred_lines,
+            pc_range=cfg.data.pc_range,
+            save_path=heat_out,
+            idx=batch_idx,
+            score_thresh=args.score_thresh,
+        )
+        print(f'[保存] {heat_out}')
+
         rendered += 1
 
     print(f'[完成] 共 {rendered} 张, 保存至 {save_dir}')
