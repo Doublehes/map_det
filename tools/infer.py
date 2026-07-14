@@ -408,7 +408,7 @@ def infer():
 
     model = MapTR(cfg.model).to(cfg.device)
     ckpt = torch.load(args.checkpoint, map_location=cfg.device)
-    model.load_state_dict(ckpt['model_state_dict'])
+    model.load_state_dict(ckpt['model_state_dict'], strict=False)
     model.eval()
     print(f'[加载] {args.checkpoint} epoch={ckpt.get("epoch", "?")}')
 

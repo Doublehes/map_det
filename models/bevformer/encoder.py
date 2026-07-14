@@ -27,6 +27,7 @@ def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim='3d',
         return ref_3d  # (bs, num_points_in_pillar, H*W, 3)
     elif dim == '2d':
         ref_y, ref_x = torch.meshgrid(
+            # torch.linspace(0.5, H - 0.5, H, dtype=dtype, device=device), # 这个应该才是正确的grid_sample位置，下面的是车体坐标系。但是奇怪的是，对模型几乎没有影响
             torch.linspace(H - 0.5, 0.5, H, dtype=dtype, device=device),
             torch.linspace(0.5, W - 0.5, W, dtype=dtype, device=device),
             indexing='ij')

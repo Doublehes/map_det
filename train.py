@@ -205,6 +205,7 @@ def main():
     if args.seg_only:
         for name, param in model.named_parameters():
             if 'decoder' in name or name.startswith('head.'):
+                print(f"freeze: {name}")
                 param.requires_grad = False
         frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
