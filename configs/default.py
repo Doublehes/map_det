@@ -124,6 +124,8 @@ model = AttrDict({
         'loss_seg_weight': 100.0,
         'loss_dice_weight': 1.0,
         'loss_heatmap_weight': 10.0,
+        'heatmap_loss_threshold': 0.05,
+        'heatmap_loss_beta': 0.01,
         'focal_gamma': 2.0,
         'focal_alpha': 0.25,
         'l1_beta': 0.01,
