@@ -47,8 +47,10 @@ class MapTR(nn.Module):
 
     def compute_loss(self, cls_scores, reg_preds, seg_preds, batch, seg_only=False, heatmap_pred=None):
         sem_mask = batch.get('semantic_mask')
-        if sem_mask is not None:
+        if sem_mask is not None and seg_preds is not None:
             sem_mask = torch.flip(sem_mask, [2,]).to(seg_preds.device)
+        else:
+            sem_mask = None
         soft_heatmap = batch.get('soft_heatmap')
         return self.criterion(
             cls_scores, reg_preds,

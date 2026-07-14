@@ -18,4 +18,5 @@ from configs.loader import AttrDict, update_config
 config_default = AttrDict(copy.deepcopy(base_cfg))
 
 # ── step 2: 用 update_config 批量覆盖（支持嵌套路径） ──
-config_default.model.map_det_head.num_decoder_layers = 3
+config_default.model.map_seg_head.enabled = True
+config_default.model.heatmap_head.enabled = False

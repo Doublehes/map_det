@@ -225,7 +225,10 @@ class MapTRCriterion(nn.Module):
             loss_dict['cls_loss'] = self.loss_cls_weight * total_cls_loss
             loss_dict['reg_loss'] = self.loss_reg_weight * total_reg_loss
         else:
-            device = seg_preds.device if seg_preds is not None else cls_scores.device
+            for t in [seg_preds, cls_scores, heatmap_pred]:
+                if t is not None:
+                    device = t.device
+                    break
             loss_dict['cls_loss'] = torch.tensor(0.0, device=device)
             loss_dict['reg_loss'] = torch.tensor(0.0, device=device)
 
