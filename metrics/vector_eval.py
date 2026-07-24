@@ -7,11 +7,38 @@ from multiprocessing import Pool
 from numpy.typing import NDArray
 from typing import Dict, List, Optional, Tuple
 from time import time
+from tqdm import tqdm
 
 from .ap import instance_match, average_precision
 
 INTERP_NUM = 200
 THRESHOLDS = [0.5, 1.0, 1.5]
+
+
+def _evaluate_single_sample(args):
+    pred_vectors, scores, groundtruth, thresholds, metric = args
+    from data.pipeline import resample_line
+
+    pred_lines = []
+    for v in pred_vectors:
+        v = np.array(v)
+        pred_lines.append(resample_line(v, INTERP_NUM))
+    pred_lines = np.stack(pred_lines) if pred_lines else np.zeros((0, INTERP_NUM, 2))
+
+    gt_lines = []
+    for v in groundtruth:
+        gt_lines.append(resample_line(v, INTERP_NUM))
+    gt_lines = np.stack(gt_lines) if gt_lines else np.zeros((0, INTERP_NUM, 2))
+
+    scores = np.array(scores)
+    tp_fp_list = instance_match(pred_lines, scores, gt_lines, thresholds, metric)
+
+    tp_fp_score_by_thr = {}
+    for i, thr in enumerate(thresholds):
+        tp, fp = tp_fp_list[i]
+        tp_fp_score = np.hstack([tp[:, None], fp[:, None], scores[:, None]])
+        tp_fp_score_by_thr[thr] = tp_fp_score
+    return tp_fp_score_by_thr
 
 
 class VectorEvaluate:
@@ -50,7 +77,7 @@ class VectorEvaluate:
 
         print('收集 GT...')
         gts = {}
-        for i in range(len(dataset)):
+        for i in tqdm(range(len(dataset)), desc='收集 GT'):
             sample = dataset[i]
             token = sample['token']
             vectors = sample['vectors']
@@ -63,8 +90,6 @@ class VectorEvaluate:
                     lines_list.append(line)
                 gt_by_cls[cls_id] = lines_list
             gts[token] = gt_by_cls
-            if (i + 1) % 100 == 0:
-                print(f'  collected {i+1}/{len(dataset)} gts')
 
         print(f'保存 GT 缓存到: {cache_file}')
         with open(cache_file, 'wb') as f:
@@ -78,32 +103,6 @@ class VectorEvaluate:
     def _interp_fixed_num(self, vector: np.ndarray, num_pts: int = INTERP_NUM) -> np.ndarray:
         from data.pipeline import resample_line
         return resample_line(vector, num_pts)
-
-    def _evaluate_single(self, pred_vectors: List, scores: List,
-                         groundtruth: List, thresholds: List,
-                         metric: str = 'chamfer') -> Dict[float, np.ndarray]:
-        pred_lines = []
-        for vector in pred_vectors:
-            vector = np.array(vector)
-            vector_interp = self._interp_fixed_num(vector, INTERP_NUM)
-            pred_lines.append(vector_interp)
-        pred_lines = np.stack(pred_lines) if pred_lines else np.zeros((0, INTERP_NUM, 2))
-
-        gt_lines = []
-        for vector in groundtruth:
-            vector_interp = self._interp_fixed_num(vector, INTERP_NUM)
-            gt_lines.append(vector_interp)
-        gt_lines = np.stack(gt_lines) if gt_lines else np.zeros((0, INTERP_NUM, 2))
-
-        scores = np.array(scores)
-        tp_fp_list = instance_match(pred_lines, scores, gt_lines, thresholds, metric)
-
-        tp_fp_score_by_thr = {}
-        for i, thr in enumerate(thresholds):
-            tp, fp = tp_fp_list[i]
-            tp_fp_score = np.hstack([tp[:, None], fp[:, None], scores[:, None]])
-            tp_fp_score_by_thr[thr] = tp_fp_score
-        return tp_fp_score_by_thr
 
     def evaluate(self, predictions: Dict, metric: str = 'chamfer') -> Dict[str, float]:
         assert self._prepare_gts_done, 'call prepare_gts() first'
@@ -141,12 +140,18 @@ class VectorEvaluate:
                 'num_preds': num_preds[label],
             }
 
-            fn = partial(self._evaluate_single, thresholds=self.thresholds, metric=metric)
+            prepared = [(v, s, g, self.thresholds, metric) for v, s, g in samples]
             if self.n_workers > 0:
                 with Pool(self.n_workers) as pool:
-                    tpfp_score_list = pool.starmap(fn, samples)
+                    tpfp_score_list = list(tqdm(
+                        pool.imap_unordered(_evaluate_single_sample, prepared),
+                        total=len(samples),
+                        desc=f'  {self.id2cat[label]}',
+                    ))
             else:
-                tpfp_score_list = [fn(*sample) for sample in samples]
+                tpfp_score_list = [
+                    _evaluate_single_sample(s) for s in tqdm(prepared, desc=f'  {self.id2cat[label]}')
+                ]
 
             sum_ap = 0.
             for thr in self.thresholds:
