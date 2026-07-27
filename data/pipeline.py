@@ -2,7 +2,7 @@ import numpy as np
 import cv2
 from shapely.geometry import LineString
 
-from typing import List, Tuple, Dict, Set, Union
+from typing import List, Tuple, Dict, Set, Union, Optional
 
 
 def normalize_image(img: np.ndarray, mean: List[float], std: List[float]) -> np.ndarray:
@@ -111,10 +111,12 @@ def rasterize_map(
     canvas_size: Tuple[int, int],
     roi_size: Tuple[float, float],
     thickness: int = 2,
+    num_classes: Optional[int] = None,
 ) -> np.ndarray:
     """将向量化线绘制为分割掩码 (辅助监督用)"""
     h, w = canvas_size
-    num_classes = max(vectors.keys()) + 1 if vectors else 1
+    if num_classes is None:
+        num_classes = max(vectors.keys()) + 1 if vectors else 1
     sem_mask = np.zeros((num_classes, h, w), dtype=np.uint8)
 
     for cls_id, lines in vectors.items():

@@ -69,6 +69,27 @@ class MaskDiceLoss(nn.Module):
         return self.loss_weight * (1 - dice.mean())
 
 
+class HeatmapLoss(nn.Module):
+    """Masked Smooth L1: 仅在 gt_heatmap > threshold 的区域计算 loss"""
+
+    def __init__(self, loss_weight=1.0, threshold=0.05, beta=0.01):
+        super().__init__()
+        self.loss_weight = loss_weight
+        self.threshold = threshold
+        self.beta = beta
+
+    def forward(self, pred, target):
+        pred = pred.sigmoid()
+        target = target.to(pred.device)
+        mask = target > self.threshold
+        if mask.sum() < 1:
+            return torch.tensor(0.0, device=pred.device)
+        diff = (pred - target).abs()
+        loss = torch.where(diff < self.beta, 0.5 * diff.pow(2) / self.beta, diff - 0.5 * self.beta)
+        loss = (loss * mask).sum() / mask.sum()
+        return self.loss_weight * loss
+
+
 class HungarianMatcher(nn.Module):
     """匈牙利匹配: 在预测query和GT线之间做二分图匹配
 
@@ -148,14 +169,21 @@ class MapTRCriterion(nn.Module):
         self.loss_reg_weight = cfg.loss_reg_weight
         self.loss_seg_weight = cfg.loss_seg_weight
         self.loss_dice_weight = cfg.loss_dice_weight
+        self.loss_heatmap_weight = cfg.loss_heatmap_weight
         self.focal_gamma = cfg.focal_gamma
         self.focal_alpha = cfg.focal_alpha
         self.l1_beta = cfg.l1_beta
         self.num_points = cfg.num_points
         self.mask_focal_loss = MaskFocalLoss(loss_weight=1.0, gamma=cfg.focal_gamma, alpha=cfg.focal_alpha)
         self.mask_dice_loss = MaskDiceLoss(loss_weight=1.0)
+        self.heatmap_loss_fn = HeatmapLoss(
+            loss_weight=cfg.loss_heatmap_weight,
+            threshold=getattr(cfg, 'heatmap_loss_threshold', 0.05),
+            beta=getattr(cfg, 'heatmap_loss_beta', 0.01),
+        )
 
-    def forward(self, cls_scores, reg_preds, gt_vectors, gt_semantic_mask=None, seg_preds=None, seg_only=False):
+    def forward(self, cls_scores, reg_preds, gt_vectors, gt_semantic_mask=None, seg_preds=None,
+                gt_heatmap=None, heatmap_pred=None, seg_only=False):
         loss_dict = {}
 
         if not seg_only:
@@ -223,7 +251,10 @@ class MapTRCriterion(nn.Module):
             loss_dict['cls_loss'] = self.loss_cls_weight * total_cls_loss
             loss_dict['reg_loss'] = self.loss_reg_weight * total_reg_loss
         else:
-            device = seg_preds.device if seg_preds is not None else cls_scores.device
+            for t in [seg_preds, cls_scores, heatmap_pred]:
+                if t is not None:
+                    device = t.device
+                    break
             loss_dict['cls_loss'] = torch.tensor(0.0, device=device)
             loss_dict['reg_loss'] = torch.tensor(0.0, device=device)
 
@@ -231,5 +262,9 @@ class MapTRCriterion(nn.Module):
         if seg_preds is not None and gt_semantic_mask is not None:
             loss_dict['seg_loss'] = self.loss_seg_weight * self.mask_focal_loss(seg_preds, gt_semantic_mask)
             loss_dict['dice_loss'] = self.loss_dice_weight * self.mask_dice_loss(seg_preds, gt_semantic_mask)
+
+        # 5. 热力图损失
+        if heatmap_pred is not None and gt_heatmap is not None:
+            loss_dict['heatmap_loss'] = self.heatmap_loss_fn(heatmap_pred, gt_heatmap)
 
         return loss_dict

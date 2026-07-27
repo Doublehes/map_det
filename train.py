@@ -15,7 +15,6 @@ from torch.optim.lr_scheduler import (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from configs.default import cfg
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 from eval import run_eval
@@ -42,7 +41,7 @@ def build_optimizer(model, cfg):
 
 def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=False):
     model.train()
-    total_loss = total_cls_loss = total_reg_loss = total_seg_loss = 0.0
+    total_loss = total_cls_loss = total_reg_loss = total_seg_loss = total_heatmap_loss = 0.0
 
     data_times, model_times = [], []
     epoch_start = time.time()
@@ -55,11 +54,11 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         t_model = time.time()
-        cls_scores, reg_preds, seg_preds = model(imgs, intrinsics, extrinsics, seg_only=seg_only)
+        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics, seg_only=seg_only)
 
         batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
 
-        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, seg_only=seg_only)
+        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, seg_only=seg_only, heatmap_pred=heatmap_pred)
         loss = sum(loss_dict.values())
 
         optimizer.zero_grad()
@@ -75,6 +74,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
         total_cls_loss += loss_dict.get('cls_loss', torch.tensor(0.0)).item()
         total_reg_loss += loss_dict.get('reg_loss', torch.tensor(0.0)).item()
         total_seg_loss += loss_dict.get('seg_loss', torch.tensor(0.0)).item() + loss_dict.get('dice_loss', torch.tensor(0.0)).item()
+        total_heatmap_loss += loss_dict.get('heatmap_loss', torch.tensor(0.0)).item()
 
         if batch_idx % 50 == 0:
             avg_data = sum(data_times[-50:]) / min(len(data_times), 50)
@@ -90,9 +90,10 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
                 f'{_get_lr_str(optimizer)} '
                 f'data_t={avg_data:.3f}s '
                 f'model_t={avg_model:.3f}s '
-                f'loss_total={loss.item():.4f} '
+                f'loss={loss.item():.4f} '
                 f'{line_loss}'
                 f'seg={loss_dict.get("seg_loss",0):.4f}+{loss_dict.get("dice_loss",0):.4f} '
+                f'heat={loss_dict.get("heatmap_loss",0):.4f} '
             )
             print(log)
 
@@ -147,46 +148,50 @@ def main():
     parser.add_argument('--freeze-backbone', action='store_true', help='冻结backbone只训练其余部分')
     parser.add_argument('--seg-only', action='store_true', help='仅训练分割头, 跳过线分类和回归')
     parser.add_argument('--epochs', type=int, default=None, help='覆盖 cfg.num_epochs')
+    parser.add_argument('config', type=str, help='配置文件路径')
     parser.add_argument('--eval-interval', type=int, default=1, help='每 N 个 epoch 执行一次评测 (0=禁用)')
     args = parser.parse_args()
 
+    from configs.loader import load_config
+    cfg = load_config(args.config)
+
     print(f'[设备] {cfg.device}')
-    print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.batch_size}, lr={cfg.lr}')
-    print(f'[数据] train={cfg.train_ann_file}')
+    print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.data.batch_size}')
+    print(f'[数据] train={cfg.data.train_ann_file}')
 
     train_dataset = MapTRDataset(
-        ann_file=cfg.train_ann_file,
-        data_root=cfg.data_root,
-        cfg=cfg,
+        ann_file=cfg.data.train_ann_file,
+        data_root=cfg.data.data_root,
+        cfg=cfg.data,
         is_train=True,
     )
 
     val_dataset = MapTRDataset(
-        ann_file=cfg.val_ann_file,
-        data_root=cfg.data_root,
-        cfg=cfg,
+        ann_file=cfg.data.val_ann_file,
+        data_root=cfg.data.data_root,
+        cfg=cfg.data,
         is_train=False,
     )
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=cfg.batch_size,
+        batch_size=cfg.data.batch_size,
         shuffle=True,
-        num_workers=cfg.num_workers,
+        num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         drop_last=True,
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=cfg.batch_size,
+        batch_size=cfg.data.batch_size,
         shuffle=False,
-        num_workers=cfg.num_workers,
+        num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         drop_last=False,
     )
 
-    model = MapTR(cfg).to(cfg.device)
+    model = MapTR(cfg.model).to(cfg.device)
     # model.bev_encoder.debug_dir = "./debug_bev_porj"
     # print(model)
     start_epoch = 0
@@ -200,6 +205,7 @@ def main():
     if args.seg_only:
         for name, param in model.named_parameters():
             if 'decoder' in name or name.startswith('head.'):
+                print(f"freeze: {name}")
                 param.requires_grad = False
         frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
         total = sum(p.numel() for p in model.parameters())

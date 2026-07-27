@@ -83,19 +83,21 @@ class FPN(nn.Module):
 class Backbone(nn.Module):
     def __init__(self, cfg):
         super().__init__()
-        self.resnet = ResNetBackbone(depth=cfg.backbone_depth, pretrained=True)
+        if cfg.type == 'resnet':
+            self.img_backbone = ResNetBackbone(depth=cfg.depth, pretrained=True)
+        else:
+            raise ValueError(f'Unsupported backbone type: {cfg.type}')
+        
         self.fpn = FPN(
-            in_channels=cfg.fpn_in_channels,
-            out_channels=cfg.fpn_out_channels,
+            in_channels=cfg.fpn.in_channels,
+            out_channels=cfg.fpn.out_channels,
         )
-        self.out_channels = cfg.fpn_out_channels
+        self.out_channels = cfg.fpn.out_channels
         self.num_feat_levels = cfg.num_feat_levels
 
     def forward(self, x):
-        feats = self.resnet(x)
+        feats = self.img_backbone(x)
         feats = self.fpn(feats)
         return feats[:self.num_feat_levels]
 
 
-def build_backbone(cfg):
-    return Backbone(cfg)

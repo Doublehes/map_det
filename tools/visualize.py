@@ -6,8 +6,9 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from configs.default import cfg
 from data.dataset import MapTRDataset
+
+cfg = None
 
 CAT_NAMES = {0: 'guide_line', 1: 'boundary'}
 CAT_COLORS = {0: (0, 255, 0), 1: (0, 0, 255)}  # BGR
@@ -180,14 +181,14 @@ def render_heatmap_curve(soft_heatmap, vectors_raw, pc_range, save_path, idx, sc
 
 def visualize_sample(sample_idx, save_dir, is_train=False):
     dataset = MapTRDataset(
-        ann_file=cfg.train_ann_file,
-        data_root=cfg.data_root,
-        cfg=cfg,
+        ann_file=cfg.data.train_ann_file,
+        data_root=cfg.data.data_root,
+        cfg=cfg.data,
         is_train=is_train,
     )
     Path(save_dir).mkdir(parents=True, exist_ok=True)
 
-    pc_min_x, pc_min_y, _, pc_max_x, pc_max_y, _ = cfg.pc_range
+    pc_min_x, pc_min_y, _, pc_max_x, pc_max_y, _ = cfg.data.pc_range
     x_range = pc_max_x - pc_min_x  # 40
     y_range = pc_max_y - pc_min_y  # 20
 
@@ -207,7 +208,7 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         sem_mask = item.get('semantic_mask')
         soft_heatmap = item.get('soft_heatmap')
         vectors_raw = vectors_to_world(
-            item['vectors'], cfg.roi_size, cfg.pc_range[0], cfg.pc_range[1])
+            item['vectors'], cfg.data.roi_size, cfg.data.pc_range[0], cfg.data.pc_range[1])
 
         available_cams = sorted(k for k, v in sample['cams'].items() if v['img_fpath'] is not None)
 
@@ -285,10 +286,10 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
 
         # ========== 相机视图 ==========
-        mean = np.array(cfg.img_norm['mean'], dtype=np.float32)
-        std = np.array(cfg.img_norm['std'], dtype=np.float32)
+        mean = np.array(cfg.data.img_norm['mean'], dtype=np.float32)
+        std = np.array(cfg.data.img_norm['std'], dtype=np.float32)
         cam_start_y = BEV_H + GAP
-        num_cams = min(len(available_cams), cfg.num_cams)
+        num_cams = min(len(available_cams), cfg.data.num_cams)
 
         for ci in range(num_cams):
             row = ci // 3
@@ -313,8 +314,8 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
                     uv, valid = project_to_image(pts, Ki, extri)
                     if valid.sum() < 2:
                         continue
-                    in_img = (uv[:, 0] >= 0) & (uv[:, 0] < cfg.img_w) & \
-                             (uv[:, 1] >= 0) & (uv[:, 1] < cfg.img_h) & valid
+                    in_img = (uv[:, 0] >= 0) & (uv[:, 0] < cfg.data.img_w) & \
+                             (uv[:, 1] >= 0) & (uv[:, 1] < cfg.data.img_h) & valid
                     if in_img.sum() < 2:
                         continue
                     uv_proj = uv[in_img].astype(np.int32)
@@ -341,7 +342,7 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         if soft_heatmap is not None:
             heat_path = Path(save_dir) / f'vis_{idx:04d}_heatmap.png'
             render_heatmap_curve(
-                soft_heatmap, vectors_raw, cfg.pc_range, heat_path,
+                soft_heatmap, vectors_raw, cfg.data.pc_range, heat_path,
                 idx, sample['scene_name'],
                 max_sigma=getattr(cfg, 'heatmap_max_sigma', 5.0),
             )
@@ -351,6 +352,7 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='MapTR数据可视化 (OpenCV)')
+    parser.add_argument('config', type=str, help='配置文件路径')
     parser.add_argument('--indices', type=int, nargs='+', default=[0, 1, 2],
                         help='要可视化的样本索引')
     parser.add_argument('--save-dir', type=str, default='work_dirs/vis',
@@ -358,4 +360,8 @@ if __name__ == '__main__':
     parser.add_argument('--is-train', action='store_true', default=False,
                         help='使用训练模式 (包含分割掩码)')
     args = parser.parse_args()
+
+    from configs.loader import load_config
+    cfg = load_config(args.config)
+
     visualize_sample(args.indices, args.save_dir, args.is_train)
