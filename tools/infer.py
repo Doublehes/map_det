@@ -282,8 +282,9 @@ def render_heatmap_pair(gt_heatmap, pred_heatmap, gt_lines, pred_lines,
         hm_left = panel_off + MARGIN + Y_LABEL_W
         hm_top = MARGIN
 
-        heat_rot = heat.T[::-1, ::-1]
+        heat_rot = heat.T[::-1, ::]
         hm_rows, hm_cols = heat_rot.shape
+        import pudb;pudb.set_trace()
 
         # ===== Top: rotated heatmap =====
         hm_raw = (heat_rot * 255).astype(np.uint8)
@@ -451,9 +452,9 @@ def infer():
         # BEV 面板
         draw_bev_panel(canvas[:ph, :pw], cfg.data.pc_range, gt_raw, pred_lines)
 
-        # GT 掩码面板 (需要 flip 对齐 BEV 坐标)
+        # GT 掩码面板
         draw_mask_panel(canvas[:ph, pw + gap:pw * 2 + gap],
-                        gt_seg_mask, 'GT Mask', flip_v=True)
+                        gt_seg_mask, 'GT Mask', flip_v=False)
 
         # Pred 掩码面板 (已经是 BEV 坐标，不 flip)
         pred_binary = (pred_seg_mask > args.seg_thresh).astype(np.float32)

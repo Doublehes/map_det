@@ -193,7 +193,7 @@ class MapTRDataset(Dataset):
             thickness=2,
             num_classes=self.cfg.num_classes,
         )
-        return torch.from_numpy(sem_mask).float()
+        return torch.from_numpy(sem_mask).float().flip(dims=[1])
 
     def _load_soft_heatmap(self, sample):
         """计算BEV自适应高斯热力图: sigma=min(d_center+d_boundary, 5m)"""
@@ -204,7 +204,7 @@ class MapTRDataset(Dataset):
             roi_size=self.cfg.roi_size,
             max_sigma=getattr(self.cfg, 'heatmap_max_sigma', 5.0),
         )
-        return torch.from_numpy(heatmap).float()
+        return torch.from_numpy(heatmap).float().flip(dims=[1])
 
 
 def collate_fn(batch):

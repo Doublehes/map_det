@@ -59,7 +59,7 @@ def render_heatmap_curve(soft_heatmap, vectors_raw, pc_range, save_path, idx, sc
     y_range = pc_max_y - pc_min_y
 
     heat = soft_heatmap[0].numpy()
-    heat_rot = heat.T[::-1, ::-1]
+    heat_rot = heat.T[::-1, ::]
     hm_rows, hm_cols = heat_rot.shape  # (160, 80)
 
     slice_dists = [0.0, 10.0, 20.0]
@@ -270,7 +270,7 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
             mask_panel[:] = (25, 25, 25)
             occupied = np.zeros((BEV_H, BEV_W), dtype=bool)
             for c in range(sem_np.shape[0]):
-                ch = np.flip(sem_np[c], axis=0)
+                ch = sem_np[c]
                 disp = cv2.resize(ch, (BEV_W, BEV_H),
                                   interpolation=cv2.INTER_NEAREST)
                 new = (disp > 0) & ~occupied
@@ -302,7 +302,8 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
             img = imgs[ci].numpy().transpose(1, 2, 0)
             img = img * std + mean
             img = np.clip(img, 0, 255).astype(np.uint8)
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = np.ascontiguousarray(img)
 
             # 投影 GT 线 (guide_line 用箭头显示方向)
             Ki = intrinsics[ci]
