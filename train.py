@@ -54,7 +54,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         t_model = time.time()
-        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics, seg_only=seg_only)
+        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics, seg_only=seg_only, batch=batch)
 
         batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
 

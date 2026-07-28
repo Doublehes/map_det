@@ -25,7 +25,7 @@ class MapTR(nn.Module):
         self.heatmap_head = BEVHeatMapHead(cfg.heatmap_head) if cfg.heatmap_head.get('enabled', True) else None
         self.criterion = MapTRCriterion(cfg.loss)
 
-    def forward(self, imgs, intrinsics, extrinsics, seg_only=False):
+    def forward(self, imgs, intrinsics, extrinsics, seg_only=False, batch=None):
         batch_size, num_cams, C, H, W = imgs.shape
 
         imgs_flat = imgs.view(batch_size * num_cams, C, H, W)
@@ -33,6 +33,11 @@ class MapTR(nn.Module):
         img_feats = [self.grid_mask(f) for f in img_feats]
 
         bev_feat = self.bev_encoder(img_feats, intrinsics, extrinsics, imgs=imgs)
+
+        flip_flag = batch.get('flip') if batch is not None else None
+        if flip_flag is not None and flip_flag.any():
+            flip_flag = flip_flag.to(bev_feat.device)
+            bev_feat[flip_flag] = bev_feat[flip_flag].flip(dims=[-2])
 
         if not seg_only:
             cls_scores, reg_preds = self.head(bev_feat)

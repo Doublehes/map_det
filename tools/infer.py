@@ -284,7 +284,7 @@ def render_heatmap_pair(gt_heatmap, pred_heatmap, gt_lines, pred_lines,
 
         heat_rot = heat.T[::-1, ::]
         hm_rows, hm_cols = heat_rot.shape
-        import pudb;pudb.set_trace()
+        # import pudb;pudb.set_trace()
 
         # ===== Top: rotated heatmap =====
         hm_raw = (heat_rot * 255).astype(np.uint8)
@@ -381,7 +381,8 @@ def render_heatmap_pair(gt_heatmap, pred_heatmap, gt_lines, pred_lines,
                 f'params: adaptive Gaussian  max_sigma={max_sigma:.1f}m  score>{score_thresh}',
                 (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
-    cv2.imwrite(str(save_path), canvas)
+    # cv2.imwrite(str(save_path), canvas)
+    return canvas
 
 
 @torch.no_grad()
@@ -432,7 +433,7 @@ def infer():
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
 
-        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics)
+        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics, batch=batch)
 
         gt_seg_mask = batch['semantic_mask'][0].numpy()  # (num_classes, 80, 160)
         pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)
@@ -471,22 +472,32 @@ def infer():
                         gt_raw, pred_lines, cam_names,
                         start_y=ph + gap, cam_w=cw, cam_h=ch, gap=gap)
 
-        out = save_dir / f'infer_{batch_idx:04d}.png'
-        cv2.imwrite(str(out), canvas)
-        print(f'[保存] {out}')
-
-        heat_out = save_dir / f'infer_{batch_idx:04d}_heatmap.png'
-        render_heatmap_pair(
+        # 热力图
+        heat_show = render_heatmap_pair(
             gt_heatmap=gt_heatmap[0],
             pred_heatmap=pred_heatmap[0],
             gt_lines=gt_raw,
             pred_lines=pred_lines,
             pc_range=cfg.data.pc_range,
-            save_path=heat_out,
+            save_path="",
             idx=batch_idx,
             score_thresh=args.score_thresh,
         )
-        print(f'[保存] {heat_out}')
+
+        flip_flag = batch['flip'][0].item() if 'flip' in batch else False
+
+        hh, hw = heat_show.shape[:2]
+        new_h = canvas.shape[0]
+        new_w = int(hw * new_h / hh)
+        heat_resized = cv2.resize(heat_show, (new_w, new_h))
+
+        result = np.concatenate([canvas, heat_resized], axis=1)
+        cv2.putText(result, f'flip={flip_flag}', (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 1)
+
+        out = save_dir / f'infer_{batch_idx:04d}.png'
+        cv2.imwrite(str(out), result)
+        print(f'[保存] {out}')
 
         rendered += 1
 

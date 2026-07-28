@@ -7,6 +7,7 @@ from PIL import Image
 from shapely.geometry import LineString
 from torch.utils.data import Dataset
 import torch
+import random
 
 MAPTR_DIR = str(Path(__file__).resolve().parent.parent / '../MapTracker')
 if MAPTR_DIR not in sys.path:
@@ -96,6 +97,17 @@ class MapTRDataset(Dataset):
 
         soft_heatmap = self._load_soft_heatmap(sample)
         ret['soft_heatmap'] = soft_heatmap  # (1, 80, 160)
+
+        do_flip = False
+        prob = getattr(self.cfg, 'bev_flip_prob', 0.0)
+        do_flip = random.random() < prob
+        if do_flip:
+            for cls_id in map_vectors:
+                map_vectors[cls_id][..., 1] = 1.0 - map_vectors[cls_id][..., 1]
+            ret["vectors"] = map_vectors
+            ret['semantic_mask'] = sem_mask.flip(dims=[1])
+            ret['soft_heatmap'] = soft_heatmap.flip(dims=[1])
+        ret['flip'] = do_flip
 
         return ret
 
@@ -242,4 +254,5 @@ def collate_fn(batch):
         heatmaps = torch.stack([b['soft_heatmap'] for b in batch], dim=0)
         ret['soft_heatmap'] = heatmaps  # (B, 1, 80, 160)
 
+    ret['flip'] = torch.tensor([b.get('flip', False) for b in batch], dtype=torch.bool)
     return ret

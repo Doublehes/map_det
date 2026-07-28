@@ -41,9 +41,9 @@ num_points = 16
 
 data = AttrDict({
     # ── 数据 ──
-    'data_root': "/media/double/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_data_multiview",
-    'train_ann_file': "/media/double/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_multiview/origin_label/owndata/dctj218_yubei_sampled_330.pkl",
-    'val_ann_file': "/media/double/T7 Shield/LINE_OBJECT_DATA/trainlabel_line_multiview/origin_label/owndata/dctj218_yubei_sampled_330.pkl",
+    'data_root': "/home/double/Documents/wangjiang/data_line",
+    'train_ann_file': "/home/double/Documents/wangjiang/data_line/tms_dazu_2026_halfscene.pkl",
+    'val_ann_file': "/home/double/Documents/wangjiang/data_line/tms_dazu_2026_halfscene.pkl",
     'cat2id': cat2id,
     'num_classes': num_classes,
     'num_points': num_points,
@@ -60,6 +60,7 @@ data = AttrDict({
     'canvas_size': canvas_size,
     'batch_size': batch_size,
     'num_workers': num_workers,
+    'bev_flip_prob': 0.5,    # BEV 左右翻转概率, 0=关闭, 0.5=50%
 })
 
 num_feat_levels = 2
