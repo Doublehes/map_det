@@ -433,7 +433,7 @@ def infer():
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
 
-        cls_scores, reg_preds, seg_preds, heatmap_pred = model(imgs, intrinsics, extrinsics, batch=batch)
+        cls_scores, reg_preds, seg_preds, heatmap_pred, bev_feat = model(imgs, intrinsics, extrinsics, batch=batch)
 
         gt_seg_mask = batch['semantic_mask'][0].numpy()  # (num_classes, 80, 160)
         pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)
@@ -498,6 +498,27 @@ def infer():
         out = save_dir / f'infer_{batch_idx:04d}.png'
         cv2.imwrite(str(out), result)
         print(f'[保存] {out}')
+
+        # BEV 均值激活图
+        pc_min_x, pc_min_y, _, pc_max_x, pc_max_y, _ = cfg.data.pc_range
+        bev_avg = bev_feat[0].mean(dim=0).cpu().numpy()  # (40, 80)
+        bev_norm = (bev_avg - bev_avg.min()) / (bev_avg.max() - bev_avg.min() + 1e-6)
+        bev_big = cv2.resize(bev_norm, (400, 200), interpolation=cv2.INTER_LINEAR)
+        bev_color = cv2.applyColorMap((bev_big * 255).astype(np.uint8), cv2.COLORMAP_JET)
+        for cls_id, lines in gt_raw.items():
+            color = (0, 255, 0) if cls_id == 0 else (0, 0, 255)
+            for pts_list in lines:
+                pts = np.array(pts_list, dtype=np.float32)
+                px = ((pts[:, 0] - pc_min_x) / (pc_max_x - pc_min_x) * 400).astype(np.int32)
+                py = ((pc_max_y - pts[:, 1]) / (pc_max_y - pc_min_y) * 200).astype(np.int32)
+                pix = np.stack([px, py], axis=1)
+                cv2.polylines(bev_color, [pix], False, color, 1)
+                cv2.circle(bev_color, tuple(pix[0]), 2, color, -1)
+        cv2.putText(bev_color, f'BEV Activation  idx={batch_idx}',
+                    (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        act_out = save_dir / f'infer_{batch_idx:04d}_bev_act.png'
+        cv2.imwrite(str(act_out), bev_color)
+        print(f'[保存] {act_out}')
 
         rendered += 1
 

@@ -99,8 +99,9 @@ class MapTRDataset(Dataset):
         ret['soft_heatmap'] = soft_heatmap  # (1, 80, 160)
 
         do_flip = False
-        prob = getattr(self.cfg, 'bev_flip_prob', 0.0)
-        do_flip = random.random() < prob
+        if self.is_train:
+            prob = getattr(self.cfg, 'bev_flip_prob', 0.0)
+            do_flip = random.random() < prob
         if do_flip:
             for cls_id in map_vectors:
                 map_vectors[cls_id][..., 1] = 1.0 - map_vectors[cls_id][..., 1]

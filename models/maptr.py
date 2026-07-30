@@ -48,7 +48,7 @@ class MapTR(nn.Module):
         seg_pred = self.seg_head(bev_feat) if self.seg_head else None
         heatmap_pred = self.heatmap_head(bev_feat) if self.heatmap_head else None
 
-        return cls_scores, reg_preds, seg_pred, heatmap_pred
+        return cls_scores, reg_preds, seg_pred, heatmap_pred, bev_feat
 
     def compute_loss(self, cls_scores, reg_preds, seg_preds, batch, seg_only=False, heatmap_pred=None):
         sem_mask = batch.get('semantic_mask')
