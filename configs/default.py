@@ -60,7 +60,12 @@ data = AttrDict({
     'canvas_size': canvas_size,
     'batch_size': batch_size,
     'num_workers': num_workers,
+
+    # ######### bev augmentation #########
     'bev_flip_prob': 0.5,    # BEV 左右翻转概率, 0=关闭, 0.5=50%
+    'bev_rot_angle': 70.0,    # BEV 最大旋转角度(度), 0=关闭
+    'bev_trans_x': 0.0,       # BEV 最大平移距离(米), x方向, 0=关闭
+    'bev_trans_y': 5.0,       # BEV 最大平移距离(米), y方向, 0=关闭
 })
 
 num_feat_levels = 2

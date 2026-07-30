@@ -405,7 +405,7 @@ def infer():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    ds = MapTRDataset(cfg.data.val_ann_file, cfg.data.data_root, cfg.data, is_train=False)
+    ds = MapTRDataset(cfg.data.val_ann_file, cfg.data.data_root, cfg.data, is_train=True)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=collate_fn)
 
     model = MapTR(cfg.model).to(cfg.device)
@@ -485,6 +485,9 @@ def infer():
         )
 
         flip_flag = batch['flip'][0].item() if 'flip' in batch else False
+        rot_deg = np.degrees(batch['rot_angle'][0].item())
+        dx_val = batch['dx'][0].item() if 'dx' in batch else 0.0
+        dy_val = batch['dy'][0].item() if 'dy' in batch else 0.0
 
         hh, hw = heat_show.shape[:2]
         new_h = canvas.shape[0]
@@ -492,11 +495,12 @@ def infer():
         heat_resized = cv2.resize(heat_show, (new_w, new_h))
 
         result = np.concatenate([canvas, heat_resized], axis=1)
-        cv2.putText(result, f'flip={flip_flag}', (50, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 1)
+        cv2.putText(result, f'flip={int(flip_flag)} rot={rot_deg:.1f} tx={dx_val:.2f} ty={dy_val:.2f}',
+                    (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 1)
 
         out = save_dir / f'infer_{batch_idx:04d}.png'
-        cv2.imwrite(str(out), result)
+        # cv2.imwrite(str(out), result)
+        cv2.imshow('result', result)
         print(f'[保存] {out}')
 
         # BEV 均值激活图
@@ -517,7 +521,9 @@ def infer():
         cv2.putText(bev_color, f'BEV Activation  idx={batch_idx}',
                     (5, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         act_out = save_dir / f'infer_{batch_idx:04d}_bev_act.png'
-        cv2.imwrite(str(act_out), bev_color)
+        # cv2.imwrite(str(act_out), bev_color)
+        cv2.imshow('bev_act', bev_color)
+        cv2.waitKey(-1)
         print(f'[保存] {act_out}')
 
         rendered += 1

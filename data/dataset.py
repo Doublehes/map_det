@@ -1,5 +1,6 @@
 import pickle
 import sys
+import copy
 import cv2
 import numpy as np
 from pathlib import Path
@@ -79,6 +80,62 @@ class MapTRDataset(Dataset):
         """返回一个样本: 多相机图像 + 内参外参 + 向量化线 + 分割掩码(训练)"""
         sample = self.samples[idx]
 
+        do_flip = False
+        rot_angle = 0.0
+        dx, dy = 0.0, 0.0
+        need_copy = False
+        if self.is_train and random.random() < getattr(self.cfg, 'bev_flip_prob', 0.0):
+            sample = copy.deepcopy(sample)
+            need_copy = True
+            do_flip = True
+            pc1 = self.cfg.pc_range[1]
+            for cls_id in sample['map_geom']:
+                for line in sample['map_geom'][cls_id]:
+                    for pt in line:
+                        pt[1] = -pt[1]
+
+        if self.is_train:
+            max_angle = getattr(self.cfg, 'bev_rot_angle', 0.0)
+            if max_angle > 0 and random.random() < 0.5:
+                angle_deg = random.uniform(-max_angle, max_angle)
+                rot_angle = np.radians(angle_deg)
+                if not need_copy:
+                    sample = copy.deepcopy(sample)
+                    need_copy = True
+                c, s = np.cos(rot_angle), np.sin(rot_angle)
+                pc0, pc1 = self.cfg.pc_range[0], self.cfg.pc_range[1]
+                for cls_id in sample['map_geom']:
+                    for line in sample['map_geom'][cls_id]:
+                        for pt in line:
+                            x, y = pt[0], pt[1]
+                            pt[0] = x * c - y * s
+                            pt[1] = x * s + y * c
+
+        if self.is_train:
+            trans_x = getattr(self.cfg, 'bev_trans_x', 0.0)
+            trans_y = getattr(self.cfg, 'bev_trans_y', 0.0)
+            if (trans_x > 0 or trans_y > 0) and random.random() < 0.5:
+                dx = random.uniform(-trans_x, trans_x) if trans_x > 0 else 0.0
+                dy = random.uniform(-trans_y, trans_y) if trans_y > 0 else 0.0
+                if not need_copy:
+                    sample = copy.deepcopy(sample)
+                    need_copy = True
+                for cls_id in sample['map_geom']:
+                    for line in sample['map_geom'][cls_id]:
+                        for pt in line:
+                            pt[0] += dx
+                            pt[1] += dy
+
+        if need_copy:
+            x_min, y_min, _, x_max, y_max, _ = self.cfg.pc_range
+            for cls_id in list(sample['map_geom'].keys()):
+                new_lines = []
+                for line in sample['map_geom'][cls_id]:
+                    filtered = [pt for pt in line if x_min <= pt[0] <= x_max and y_min <= pt[1] <= y_max]
+                    if len(filtered) >= 2:
+                        new_lines.append(filtered)
+                sample['map_geom'][cls_id] = new_lines
+
         imgs, intrinsics, extrinsics = self._load_images(sample)
         map_vectors = self._load_map(sample)
 
@@ -98,17 +155,10 @@ class MapTRDataset(Dataset):
         soft_heatmap = self._load_soft_heatmap(sample)
         ret['soft_heatmap'] = soft_heatmap  # (1, 80, 160)
 
-        do_flip = False
-        if self.is_train:
-            prob = getattr(self.cfg, 'bev_flip_prob', 0.0)
-            do_flip = random.random() < prob
-        if do_flip:
-            for cls_id in map_vectors:
-                map_vectors[cls_id][..., 1] = 1.0 - map_vectors[cls_id][..., 1]
-            ret["vectors"] = map_vectors
-            ret['semantic_mask'] = sem_mask.flip(dims=[1])
-            ret['soft_heatmap'] = soft_heatmap.flip(dims=[1])
         ret['flip'] = do_flip
+        ret['rot_angle'] = rot_angle
+        ret['dx'] = dx
+        ret['dy'] = dy
 
         return ret
 
@@ -256,4 +306,7 @@ def collate_fn(batch):
         ret['soft_heatmap'] = heatmaps  # (B, 1, 80, 160)
 
     ret['flip'] = torch.tensor([b.get('flip', False) for b in batch], dtype=torch.bool)
+    ret['rot_angle'] = torch.tensor([b.get('rot_angle', 0.0) for b in batch], dtype=torch.float32)
+    ret['dx'] = torch.tensor([b.get('dx', 0.0) for b in batch], dtype=torch.float32)
+    ret['dy'] = torch.tensor([b.get('dy', 0.0) for b in batch], dtype=torch.float32)
     return ret

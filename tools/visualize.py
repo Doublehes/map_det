@@ -350,6 +350,14 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
         else:
             result = canvas
 
+        flip_tag = 'FLIP' if item.get('flip', False) else 'NoFlip'
+        rot_deg = np.degrees(item.get('rot_angle', 0.0))
+        dx_val = item.get('dx', 0.0)
+        dy_val = item.get('dy', 0.0)
+        info = f'{flip_tag} rot={rot_deg:.1f} tx={dx_val:.2f} ty={dy_val:.2f}'
+        cv2.putText(result, info, (canvas.shape[1] + 10, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
         out_path = Path(save_dir) / f'vis_{idx:04d}.png'
         cv2.imwrite(str(out_path), result)
         print(f'[可视化] 已保存 {out_path}')
