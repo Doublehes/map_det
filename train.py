@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from data.dataset import MapTRDataset, collate_fn
 from models.maptr import MapTR
 from eval import run_eval
+from torch.utils.tensorboard import SummaryWriter
 from utils.timer import Timer
 
 def _get_lr_str(optimizer):
@@ -39,7 +40,7 @@ def build_optimizer(model, cfg):
     return AdamW(param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
 
-def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=False):
+def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=False, writer=None, global_step=0):
     model.train()
     total_loss = total_cls_loss = total_reg_loss = total_seg_loss = total_heatmap_loss = 0.0
 
@@ -76,6 +77,16 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
         total_seg_loss += loss_dict.get('seg_loss', torch.tensor(0.0)).item() + loss_dict.get('dice_loss', torch.tensor(0.0)).item()
         total_heatmap_loss += loss_dict.get('heatmap_loss', torch.tensor(0.0)).item()
 
+        if writer is not None:
+            writer.add_scalar('loss/total', loss.item(), global_step)
+            writer.add_scalar('loss/cls', loss_dict.get('cls_loss', 0), global_step)
+            writer.add_scalar('loss/reg', loss_dict.get('reg_loss', 0), global_step)
+            writer.add_scalar('loss/seg', loss_dict.get('seg_loss', 0), global_step)
+            writer.add_scalar('loss/dice', loss_dict.get('dice_loss', 0), global_step)
+            writer.add_scalar('loss/heatmap', loss_dict.get('heatmap_loss', 0), global_step)
+            writer.add_scalar('lr', optimizer.param_groups[0]['lr'], global_step)
+        global_step += 1
+
         if batch_idx % 50 == 0:
             avg_data = sum(data_times[-50:]) / min(len(data_times), 50)
             avg_model = sum(model_times[-50:]) / min(len(model_times), 50)
@@ -104,8 +115,10 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
 
     epoch_time = time.time() - epoch_start
     avg_loss = total_loss / len(loader)
+    if writer is not None:
+        writer.add_scalar('epoch/avg_loss', avg_loss, epoch)
     print(f'[Epoch {epoch+1}] 平均 loss={avg_loss:.4f} {_get_lr_str(optimizer)} 耗时={epoch_time:.0f}s')
-    return avg_loss
+    return avg_loss, global_step
 
 
 def save_checkpoint(model, optimizer, epoch, cfg, save_dir, filename=None):
@@ -245,9 +258,13 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'[模型] 总参数: {total_params/1e6:.2f}M, 可训练: {trainable_params/1e6:.2f}M')
 
+    writer = SummaryWriter(log_dir=os.path.join(args.work_dir, 'logs'))
     timer = Timer()
+    global_step = 0
     for epoch in range(start_epoch, cfg.num_epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, epoch, cfg, seg_only=args.seg_only)
+        train_loss, global_step = train_one_epoch(
+            model, train_loader, optimizer, scheduler, epoch, cfg,
+            seg_only=args.seg_only, writer=writer, global_step=global_step)
         save_checkpoint(model, optimizer, epoch, cfg, args.work_dir)
 
         if not args.seg_only and args.eval_interval > 0 and (epoch + 1) % args.eval_interval == 0:
@@ -258,6 +275,7 @@ def main():
                 evaluator.print_results(results)
             model.train()
 
+    writer.close()
     print('[训练完成]')
 
 
