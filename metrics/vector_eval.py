@@ -131,6 +131,7 @@ class VectorEvaluate:
                 num_preds[label] += len(vectors_by_cls[label])
 
         result_dict = {}
+        all_pr_data = {}
         print(f'\nevaluating {len(self.id2cat)} categories...')
 
         for label in self.id2cat.keys():
@@ -153,12 +154,15 @@ class VectorEvaluate:
                     _evaluate_single_sample(s) for s in tqdm(prepared, desc=f'  {self.id2cat[label]}')
                 ]
 
+            cat_name = self.id2cat[label]
+            pr_data = {}
             sum_ap = 0.
             for thr in self.thresholds:
                 tp_fp_score = np.vstack([s[thr] for s in tpfp_score_list])
                 sort_inds = np.argsort(-tp_fp_score[:, -1])
                 tp = tp_fp_score[sort_inds, 0]
                 fp = tp_fp_score[sort_inds, 1]
+                scores_sorted = tp_fp_score[sort_inds, -1]
                 tp = np.cumsum(tp, axis=0)
                 fp = np.cumsum(fp, axis=0)
                 eps = np.finfo(np.float32).eps
@@ -166,14 +170,22 @@ class VectorEvaluate:
                 precisions = tp / np.maximum(tp + fp, eps)
                 ap = average_precision(recalls, precisions, 'area')
                 sum_ap += ap
-                result_dict[self.id2cat[label]][f'AP@{thr}'] = ap
+                result_dict[cat_name][f'AP@{thr}'] = ap
+                pr_data[thr] = {
+                    'recalls': recalls,
+                    'precisions': precisions,
+                    'scores': scores_sorted,
+                    'ap': ap,
+                }
+            all_pr_data[cat_name] = pr_data
 
             ap = sum_ap / len(self.thresholds)
-            result_dict[self.id2cat[label]]['AP'] = ap
+            result_dict[cat_name]['AP'] = ap
 
+        self._pr_data = all_pr_data
         mAP = sum(result_dict[cat]['AP'] for cat in self.id2cat.values()) / len(self.id2cat)
         result_dict['mAP'] = mAP
-        return result_dict
+        return result_dict, all_pr_data
 
     def print_results(self, result_dict: Dict[str, float]):
         try:

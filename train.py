@@ -271,8 +271,7 @@ def main():
             print(f'\n{"="*50}\n[评测] Epoch {epoch+1}')
             model.eval()
             with timer('评测整体'):
-                results, evaluator = run_eval(model, val_loader, cfg, n_workers=4)
-                evaluator.print_results(results)
+                results, evaluator = run_eval(model, val_loader, cfg, n_workers=4, writer=writer, epoch=epoch)
             model.train()
 
     writer.close()
