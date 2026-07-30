@@ -176,7 +176,7 @@ def render_heatmap_curve(soft_heatmap, vectors_raw, pc_range, save_path, idx, sc
                 f'params: adaptive Gaussian  max_sigma={max_sigma:.1f}m',
                 (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
-    cv2.imwrite(str(save_path), canvas)
+    return canvas
 
 
 def visualize_sample(sample_idx, save_dir, is_train=False):
@@ -334,20 +334,25 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
             cv2.putText(panel, f'{ci}: {available_cams[ci]}', (5, 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
 
-        # ========== 保存主图 ==========
-        out_path = Path(save_dir) / f'vis_{idx:04d}.png'
-        cv2.imwrite(str(out_path), canvas)
-        print(f'[可视化] 已保存 {out_path}')
+        # ========== 拼接保存 ==========
+        heat_canvas = render_heatmap_curve(
+            soft_heatmap, vectors_raw, cfg.data.pc_range, "",
+            idx, sample['scene_name'],
+            max_sigma=getattr(cfg, 'heatmap_max_sigma', 5.0),
+        ) if soft_heatmap is not None else None
 
-        # ========== 保存热力图+剖面曲线 (单独文件) ==========
-        if soft_heatmap is not None:
-            heat_path = Path(save_dir) / f'vis_{idx:04d}_heatmap.png'
-            render_heatmap_curve(
-                soft_heatmap, vectors_raw, cfg.data.pc_range, heat_path,
-                idx, sample['scene_name'],
-                max_sigma=getattr(cfg, 'heatmap_max_sigma', 5.0),
-            )
-            print(f'[可视化] 已保存 {heat_path}')
+        if heat_canvas is not None:
+            hh, hw = heat_canvas.shape[:2]
+            new_h = canvas.shape[0]
+            new_w = int(hw * new_h / hh)
+            heat_resized = cv2.resize(heat_canvas, (new_w, new_h))
+            result = np.concatenate([canvas, heat_resized], axis=1)
+        else:
+            result = canvas
+
+        out_path = Path(save_dir) / f'vis_{idx:04d}.png'
+        cv2.imwrite(str(out_path), result)
+        print(f'[可视化] 已保存 {out_path}')
 
 
 if __name__ == '__main__':
