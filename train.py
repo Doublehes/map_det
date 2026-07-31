@@ -168,6 +168,9 @@ def main():
     from configs.loader import load_config
     cfg = load_config(args.config)
 
+    if args.epochs is not None:
+        cfg.num_epochs = args.epochs
+
     print(f'[设备] {cfg.device}')
     print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.data.batch_size}')
     print(f'[数据] train={cfg.data.train_ann_file}')
@@ -208,9 +211,6 @@ def main():
     # model.bev_encoder.debug_dir = "./debug_bev_porj"
     # print(model)
     start_epoch = 0
-
-    if args.epochs is not None:
-        cfg.num_epochs = args.epochs
 
     if args.pretrained and os.path.exists(args.pretrained):
         load_pretrained(model, args.pretrained, cfg, args.freeze_backbone)
@@ -265,7 +265,10 @@ def main():
         train_loss, global_step = train_one_epoch(
             model, train_loader, optimizer, scheduler, epoch, cfg,
             seg_only=args.seg_only, writer=writer, global_step=global_step)
-        save_checkpoint(model, optimizer, epoch, cfg, args.work_dir)
+        
+        save_checkpoint(model, optimizer, epoch, cfg, args.work_dir, filename='latest.pth')
+        if (epoch + 1) % cfg.checkpoint_interval == 0:
+            save_checkpoint(model, optimizer, epoch, cfg, args.work_dir)
 
         if not args.seg_only and args.eval_interval > 0 and (epoch + 1) % args.eval_interval == 0:
             print(f'\n{"="*50}\n[评测] Epoch {epoch+1}')

@@ -162,6 +162,8 @@ config_default = AttrDict({
     # ── 评测 ──
     'score_thr': 0.3,
     'eval_thresholds': [0.5, 1.0, 1.5],
+
+    'checkpoint_interval': 6
 })
 
 # 派生字段

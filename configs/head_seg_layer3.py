@@ -21,5 +21,5 @@ config_default = AttrDict(copy.deepcopy(base_cfg))
 config_default.model.map_seg_head.enabled = True
 config_default.model.heatmap_head.enabled = False
 
-config_default.model.bev_encoder.num_layers = 3
+config_default.model.bev_encoder.num_layers = 1
 config_default.model.map_det_head.num_decoder_layers = 3
