@@ -91,12 +91,13 @@ class MapTRHead(nn.Module):
         bev_embed = self.input_proj(bev_features) + pos_embed
         return bev_embed
 
-    def forward(self, bev_feat):
+    def forward(self, bev_feat, return_all_layers=False):
         """
         bev_feat: (B, bev_embed_dims, H, W)
         Returns:
             cls_scores: (B, num_queries, num_classes)
             reg_preds: (B, num_queries, num_points, 2)
+            若 return_all_layers=True: cls_scores/reg_preds 为 list, 每层一个
         """
         # 1. Position encoding
         bev_embed = self._prepare_context(bev_feat)  # (B, embed_dims, H, W)
@@ -124,7 +125,12 @@ class MapTRHead(nn.Module):
             reg_branches=self.reg_branches,
         )
 
-        # 5. Classification + regression from last layer
+        # 5. Classification + regression
+        if return_all_layers:
+            cls_scores_all = [self.cls_branches[l](inter_queries[l]) for l in range(len(inter_queries))]
+            reg_preds_all = inter_refs
+            return cls_scores_all, reg_preds_all
+
         cls_scores = self.cls_branches[-1](inter_queries[-1])   # (B, num_q, num_classes)
         reg_preds = inter_refs[-1]                                # (B, num_q, num_pts, 2)
 

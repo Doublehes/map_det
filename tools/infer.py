@@ -133,9 +133,9 @@ def draw_bev_panel(panel, pc_range, gt_lines, pred_lines):
 
     cv2.putText(panel, 'BEV  GT(green/red)  Pred(blue)', (8, 22),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
-    cv2.putText(panel, 'X(前)', (pw - 45, 16),
+    cv2.putText(panel, 'X', (pw - 45, 16),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
-    cv2.putText(panel, 'Y(左)', (4, 28),
+    cv2.putText(panel, 'Y', (4, 28),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, (100, 100, 100), 1)
 
 
@@ -385,6 +385,27 @@ def render_heatmap_pair(gt_heatmap, pred_heatmap, gt_lines, pred_lines,
     return canvas
 
 
+def render_layers_bev(gt_raw, cls_list, reg_list, pc_range, roi_size,
+                      score_thr, save_path, idx):
+    """每层一个 BEV 面板, 纵向堆叠, 显示 GT + 该层预测线"""
+    num_layers = len(reg_list)
+    pw, ph = 520, 260
+    gap = 10
+    canvas = np.zeros((num_layers * ph + (num_layers - 1) * gap, pw, 3), np.uint8)
+    for l in range(num_layers):
+        panel = canvas[l * (ph + gap): l * (ph + gap) + ph, :]
+        lines_l, scores_l = decode_predictions(
+            cls_list[l][0], reg_list[l][0], roi_size, pc_range, score_thr)
+        draw_bev_panel(panel, pc_range, gt_raw, lines_l)
+        num_lines = len(lines_l[0]) + len(lines_l[1])
+        cv2.putText(panel, f'Layer {l}  ({num_lines} lines)', (8, 44),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+        cv2.putText(panel, f'idx={idx}', (pw - 90, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
+    cv2.imwrite(str(save_path), canvas)
+    print(f'[保存] {save_path}')
+
+
 @torch.no_grad()
 def infer():
     import argparse
@@ -396,6 +417,8 @@ def infer():
     parser.add_argument('--score-thresh', type=float, default=0.7)
     parser.add_argument('--seg-thresh', type=float, default=0.4,
                         help='预测分割掩码二值化阈值')
+    parser.add_argument('--vis-layers', action='store_true',
+                        help='可视化每一层 decoder 输出')
     args = parser.parse_args()
 
     global cfg
@@ -432,6 +455,18 @@ def infer():
         imgs = batch['imgs'].to(cfg.device)
         intrinsics = batch['intrinsics'].to(cfg.device)
         extrinsics = batch['extrinsics'].to(cfg.device)
+
+        if args.vis_layers:
+            cls_all, reg_all, _, _, _ = model(imgs, intrinsics, extrinsics,
+                                              batch=batch, return_all_layers=True)
+            sample = ds.samples[batch_idx]
+            gt_raw = vectors_to_world(
+                batch['vectors'][0], cfg.data.roi_size, cfg.data.pc_range[0], cfg.data.pc_range[1])
+            layer_out = save_dir / f'infer_{batch_idx:04d}_layers.png'
+            render_layers_bev(gt_raw, cls_all, reg_all, cfg.data.pc_range,
+                              cfg.data.roi_size, args.score_thresh, layer_out, batch_idx)
+            rendered += 1
+            continue
 
         cls_scores, reg_preds, seg_preds, heatmap_pred, bev_feat = model(imgs, intrinsics, extrinsics, batch=batch)
 

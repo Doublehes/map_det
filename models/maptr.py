@@ -107,7 +107,8 @@ class MapTR(nn.Module):
             y_center=float((pc[4] + pc[1]) / 2),
         )
 
-    def forward(self, imgs, intrinsics, extrinsics, seg_only=False, batch=None):
+    def forward(self, imgs, intrinsics, extrinsics, seg_only=False, batch=None,
+                return_all_layers=False):
         batch_size, num_cams, C, H, W = imgs.shape
 
         imgs_flat = imgs.view(batch_size * num_cams, C, H, W)
@@ -126,7 +127,7 @@ class MapTR(nn.Module):
             )
 
         if not seg_only:
-            cls_scores, reg_preds = self.head(bev_feat)
+            cls_scores, reg_preds = self.head(bev_feat, return_all_layers=return_all_layers)
         else:
             cls_scores = None
             reg_preds = None
