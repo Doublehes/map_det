@@ -159,10 +159,14 @@ config_default = AttrDict({
     'min_lr_ratio': 1e-2,
     'log_interval': 50,
 
+    # ── 冻结配置 ──
+    'freeze_modules': [],   # 冻结的模块前缀列表, 空=不冻结. 例: ['backbone.', 'bev_encoder.', 'seg_head.', 'heatmap_head.'] = 只训练检测头
+
     # ── 评测 ──
     'score_thr': 0.3,
     'eval_thresholds': [0.5, 1.0, 1.5],
-
+    
+    # ── 检查点配置 ──
     'checkpoint_interval': 6
 })
 

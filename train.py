@@ -224,6 +224,15 @@ def main():
         total = sum(p.numel() for p in model.parameters())
         print(f'[分割模式] decoder + head 已冻结, {frozen/1e6:.1f}M/{total/1e6:.1f}M 参数冻结')
 
+    freeze_modules = getattr(cfg, 'freeze_modules', [])
+    if freeze_modules:
+        for name, param in model.named_parameters():
+            if any(name.startswith(p) for p in freeze_modules):
+                param.requires_grad = False
+        frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f'[冻结] 模块 {freeze_modules}, {frozen/1e6:.1f}M/{total/1e6:.1f}M 参数冻结')
+
     optimizer = build_optimizer(model, cfg)
 
     total_iters = cfg.num_epochs * len(train_loader)
