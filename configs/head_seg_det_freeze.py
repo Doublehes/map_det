@@ -20,4 +20,6 @@ config_default = AttrDict(copy.deepcopy(base_cfg))
 # ── step 2: 用 update_config 批量覆盖（支持嵌套路径） ──
 config_default.model.map_seg_head.enabled = True
 config_default.model.heatmap_head.enabled = False
-config_default.model.map_det_head.enabled = False
+config_default.model.map_det_head.enabled = True
+
+config_default.freeze_modules = ['backbone.', 'bev_encoder.', 'seg_head.', 'heatmap_head.']

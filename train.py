@@ -40,7 +40,7 @@ def build_optimizer(model, cfg):
     return AdamW(param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
 
-def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=False, writer=None, global_step=0):
+def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None, global_step=0):
     model.train()
     total_loss = total_cls_loss = total_reg_loss = total_seg_loss = total_heatmap_loss = 0.0
 
@@ -55,11 +55,11 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         t_model = time.time()
-        cls_scores, reg_preds, seg_preds, heatmap_pred, _ = model(imgs, intrinsics, extrinsics, seg_only=seg_only, batch=batch)
+        cls_scores, reg_preds, seg_preds, heatmap_pred, _ = model(imgs, intrinsics, extrinsics, batch=batch)
 
         batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
 
-        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, seg_only=seg_only, heatmap_pred=heatmap_pred)
+        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, heatmap_pred=heatmap_pred)
         loss = sum(loss_dict.values())
 
         optimizer.zero_grad()
@@ -94,7 +94,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, seg_only=Fa
             iters_done = epoch * len(loader) + batch_idx + 1
             iters_total = cfg.num_epochs * len(loader)
             eta = (iters_total - iters_done) * iter_time
-            line_loss = '' if seg_only else f'cls={loss_dict.get("cls_loss",0):.4f} reg={loss_dict.get("reg_loss",0):.4f} '
+            line_loss = '' if 'cls_loss' not in loss_dict else f'cls={loss_dict.get("cls_loss",0):.4f} reg={loss_dict.get("reg_loss",0):.4f} '
             log = (
                 f'[E {epoch+1}/{cfg.num_epochs}] [{batch_idx}/{len(loader)}] '
                 f'ETA={eta/60:.0f}min '
@@ -159,7 +159,6 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='恢复训练的 checkpoint')
     parser.add_argument('--pretrained', type=str, default=None, help='预训练权重 (仅加载模型, 从epoch0开始)')
     parser.add_argument('--freeze-backbone', action='store_true', help='冻结backbone只训练其余部分')
-    parser.add_argument('--seg-only', action='store_true', help='仅训练分割头, 跳过线分类和回归')
     parser.add_argument('--epochs', type=int, default=None, help='覆盖 cfg.num_epochs')
     parser.add_argument('config', type=str, help='配置文件路径')
     parser.add_argument('--eval-interval', type=int, default=1, help='每 N 个 epoch 执行一次评测 (0=禁用)')
@@ -215,15 +214,6 @@ def main():
     if args.pretrained and os.path.exists(args.pretrained):
         load_pretrained(model, args.pretrained, cfg, args.freeze_backbone)
 
-    if args.seg_only:
-        for name, param in model.named_parameters():
-            if 'decoder' in name or name.startswith('head.'):
-                print(f"freeze: {name}")
-                param.requires_grad = False
-        frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-        total = sum(p.numel() for p in model.parameters())
-        print(f'[分割模式] decoder + head 已冻结, {frozen/1e6:.1f}M/{total/1e6:.1f}M 参数冻结')
-
     freeze_modules = getattr(cfg, 'freeze_modules', [])
     if freeze_modules:
         for name, param in model.named_parameters():
@@ -273,13 +263,13 @@ def main():
     for epoch in range(start_epoch, cfg.num_epochs):
         train_loss, global_step = train_one_epoch(
             model, train_loader, optimizer, scheduler, epoch, cfg,
-            seg_only=args.seg_only, writer=writer, global_step=global_step)
+            writer=writer, global_step=global_step)
         
         save_checkpoint(model, optimizer, epoch, cfg, args.work_dir, filename='latest.pth')
         if (epoch + 1) % cfg.checkpoint_interval == 0:
             save_checkpoint(model, optimizer, epoch, cfg, args.work_dir)
 
-        if not args.seg_only and args.eval_interval > 0 and (epoch + 1) % args.eval_interval == 0:
+        if model.head is not None and args.eval_interval > 0 and (epoch + 1) % args.eval_interval == 0:
             print(f'\n{"="*50}\n[评测] Epoch {epoch+1}')
             model.eval()
             with timer('评测整体'):

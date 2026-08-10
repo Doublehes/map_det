@@ -41,9 +41,9 @@ num_points = 16
 
 data = AttrDict({
     # ── 数据 ──
-    'data_root': "/home/double/Documents/wangjiang/data_line",
-    'train_ann_file': "/home/double/Documents/wangjiang/data_line/tms_dazu_2026_halfscene.pkl",
-    'val_ann_file': "/home/double/Documents/wangjiang/data_line/tms_dazu_2026_halfscene.pkl",
+    'data_root': "/home/double/Documents/wangjiang/line_data",
+    'train_ann_file': "/home/double/Documents/wangjiang/line_data/dctj218_yubei.pkl",
+    'val_ann_file': "/home/double/Documents/wangjiang/line_data/dctj218_yubei_sampled_330.pkl",
     'cat2id': cat2id,
     'num_classes': num_classes,
     'num_points': num_points,
@@ -65,7 +65,7 @@ data = AttrDict({
     'bev_flip_prob': 0.5,    # BEV 左右翻转概率, 0=关闭, 0.5=50%
     'bev_rot_angle': 70.0,    # BEV 最大旋转角度(度), 0=关闭
     'bev_trans_x': 0.0,       # BEV 最大平移距离(米), x方向, 0=关闭
-    'bev_trans_y': 5.0,       # BEV 最大平移距离(米), y方向, 0=关闭
+    'bev_trans_y': 0.0,       # BEV 最大平移距离(米), y方向, 0=关闭
 })
 
 num_feat_levels = 2
@@ -103,6 +103,7 @@ model = AttrDict({
     }),
 
     'map_det_head': AttrDict({
+        'enabled': True,
         'type': 'maptr',
         'num_classes': num_classes,
         'num_queries': 32,
@@ -113,29 +114,30 @@ model = AttrDict({
         'num_decoder_layers': 1,
         'dropout': 0.1,
         'ffn_channels': 512,
+        'matcher_cls_weight': 5.0,
+        'matcher_reg_weight': 50.0,
+        'loss_cls_weight': 5.0,
+        'loss_reg_weight': 50.0,
+        'focal_gamma': 2.0,
+        'focal_alpha': 0.25,
+        'l1_beta': 0.01,
     }),
     'map_seg_head': AttrDict({
         'enabled': True,
         'type': 'mapseg',
         'bev_embed_dims': bev_embed_dims,
         'num_classes': num_classes,
+        'loss_seg_weight': 100.0,
+        'loss_dice_weight': 1.0,
+        'focal_gamma': 2.0,
+        'focal_alpha': 0.25,
     }),
     'heatmap_head': AttrDict({
         'enabled': True,
         'bev_embed_dims': bev_embed_dims,
-    }),
-    'loss': AttrDict({
-        'loss_cls_weight': 5.0,
-        'loss_reg_weight': 50.0,
-        'loss_seg_weight': 100.0,
-        'loss_dice_weight': 1.0,
         'loss_heatmap_weight': 10.0,
-        'heatmap_loss_threshold': 0.05,
-        'heatmap_loss_beta': 0.01,
-        'focal_gamma': 2.0,
-        'focal_alpha': 0.25,
-        'l1_beta': 0.01,
-        'num_points': num_points,
+        'loss_threshold': 0.05,
+        'loss_beta': 0.01,
     }),
 })
 

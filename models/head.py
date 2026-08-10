@@ -4,6 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .decoder import MapTransformerDecoder
+from .losses import (
+    HungarianMatcher, focal_loss, l1_loss,
+    MaskFocalLoss, MaskDiceLoss, HeatmapLoss,
+)
 
 
 class SinePositionalEncoding(nn.Module):
@@ -71,6 +75,17 @@ class MapTRHead(nn.Module):
         self.cls_branches = nn.ModuleList([cls_branch for _ in range(num_layers)])
         self.reg_branches = nn.ModuleList([reg_branch for _ in range(num_layers)])
 
+        # 损失: Hungarian 匹配 + 分类/回归损失参数
+        self.matcher = HungarianMatcher(
+            cls_weight=cfg.matcher_cls_weight,
+            reg_weight=cfg.matcher_reg_weight,
+        )
+        self.loss_cls_weight = cfg.loss_cls_weight
+        self.loss_reg_weight = cfg.loss_reg_weight
+        self.focal_gamma = cfg.focal_gamma
+        self.focal_alpha = cfg.focal_alpha
+        self.l1_beta = cfg.l1_beta
+
         self.init_weights()
 
     def init_weights(self):
@@ -136,6 +151,79 @@ class MapTRHead(nn.Module):
 
         return cls_scores, reg_preds
 
+    def loss(self, cls_scores, reg_preds, gt_vectors):
+        """Hungarian 匹配后计算分类 FocalLoss + 回归 SmoothL1Loss
+
+        gt_vectors: list of dict {cls_id: (N, 1|2, num_points, 2)}, 长度 = batch_size
+        Returns:
+            {'cls_loss': Tensor, 'reg_loss': Tensor}
+        """
+        loss_dict = {}
+        bs = len(gt_vectors)
+        device = cls_scores.device
+
+        # 1. 展平GT: 将各个类别的线合并为统一的列表
+        gt_labels_list, gt_lines_list = [], []
+        for i in range(bs):
+            vec = gt_vectors[i]
+            labels, lines = [], []
+            for cls_id in sorted(vec.keys()):
+                cls_lines = vec[cls_id]
+                for j in range(cls_lines.shape[0]):
+                    labels.append(cls_id)
+                    line = cls_lines[j].to(device).float()
+                    if line.shape[0] == 1:
+                        line = line.expand(2, -1, -1)
+                    lines.append(line)
+            if len(labels) == 0:
+                labels.append(0)
+                lines.append(torch.zeros((2, self.num_points, 2), device=device, dtype=torch.float))
+            gt_labels_list.append(torch.tensor(labels, device=device, dtype=torch.long))
+            gt_lines_list.append(torch.stack(lines, dim=0))
+
+        # 2. Hungarian匹配: 每个query匹配到最优GT线
+        indices = self.matcher(cls_scores, reg_preds, gt_labels_list, gt_lines_list)
+
+        # 3. 计算匹配后的损失
+        total_cls_loss = 0.0
+        total_reg_loss = 0.0
+        num_matched = 0
+
+        for i in range(bs):
+            pred_idx, tgt_idx = indices[i][:2]
+            best_perm = indices[i][2] if len(indices[i]) > 2 else None
+            num_q, num_cls = cls_scores.shape[1], cls_scores.shape[2]
+
+            # 所有 query 的 cls target: 负样本全0, 正样本 one-hot
+            cls_target = cls_scores[i].new_zeros(num_q, num_cls)
+
+            if len(pred_idx) > 0:
+                tgt_cls = gt_labels_list[i][tgt_idx]
+                cls_target[pred_idx, tgt_cls] = 1.0
+
+                matched_reg = reg_preds[i, pred_idx]
+                tgt_lines = gt_lines_list[i][tgt_idx]
+                if best_perm is not None and tgt_lines.dim() == 4:
+                    M = len(pred_idx)
+                    tgt_lines = tgt_lines[torch.arange(M, device=tgt_lines.device), best_perm]
+                total_reg_loss += l1_loss(matched_reg, tgt_lines, self.l1_beta)
+                num_matched += len(pred_idx)
+
+            # cls loss: 所有 query 都计算, 负样本被推向全0
+            total_cls_loss += focal_loss(
+                cls_scores[i], cls_target, self.focal_gamma, self.focal_alpha, reduction='sum')
+
+        if num_matched > 0:
+            total_cls_loss = total_cls_loss / num_matched
+            total_reg_loss = total_reg_loss / num_matched
+        else:
+            total_cls_loss = cls_scores.mean() * 0.0
+            total_reg_loss = reg_preds.mean() * 0.0
+
+        loss_dict['cls_loss'] = self.loss_cls_weight * total_cls_loss
+        loss_dict['reg_loss'] = self.loss_reg_weight * total_reg_loss
+        return loss_dict
+
 
 class MapSegHead(nn.Module):
     """分割头: 上采样 BEV 特征到分割图, 4x4px/m 均一分辨率"""
@@ -156,6 +244,10 @@ class MapSegHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(128, self.num_classes, kernel_size=1),
         )
+        self.mask_focal_loss = MaskFocalLoss(loss_weight=1.0, gamma=cfg.focal_gamma, alpha=cfg.focal_alpha)
+        self.mask_dice_loss = MaskDiceLoss(loss_weight=1.0)
+        self.loss_seg_weight = cfg.loss_seg_weight
+        self.loss_dice_weight = cfg.loss_dice_weight
         self._init_bias()
 
     def _init_bias(self):
@@ -164,6 +256,14 @@ class MapSegHead(nn.Module):
     def forward(self, bev_feat):
         x = self.relu(self.conv_in(bev_feat))
         return self.upsample(x)
+
+    def loss(self, seg_preds, gt_semantic_mask):
+        """分割损失: per-class focal + dice"""
+        gt_semantic_mask = gt_semantic_mask.to(seg_preds.device)
+        return {
+            'seg_loss': self.loss_seg_weight * self.mask_focal_loss(seg_preds, gt_semantic_mask),
+            'dice_loss': self.loss_dice_weight * self.mask_dice_loss(seg_preds, gt_semantic_mask),
+        }
 
 
 class BEVHeatMapHead(nn.Module):
@@ -175,8 +275,18 @@ class BEVHeatMapHead(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.conv_out = nn.Conv2d(128, 1, kernel_size=1)
+        self.heatmap_loss_fn = HeatmapLoss(
+            loss_weight=cfg.loss_heatmap_weight,
+            threshold=cfg.loss_threshold,
+            beta=cfg.loss_beta,
+        )
 
     def forward(self, bev_feat):
         x = self.relu(self.conv_in(bev_feat))
         x = self.upsample(x)
         return self.conv_out(x)
+
+    def loss(self, heatmap_pred, gt_heatmap):
+        """热力图损失: masked smooth l1 (权重在 loss_fn 内部)"""
+        gt_heatmap = gt_heatmap.to(heatmap_pred.device)
+        return {'heatmap_loss': self.heatmap_loss_fn(heatmap_pred, gt_heatmap)}

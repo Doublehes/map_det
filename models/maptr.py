@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from .backbone import Backbone
 from .bev_encoder import BEVFormerEncoder, GridMask
 from .head import MapTRHead, MapSegHead, BEVHeatMapHead
-from .losses import MapTRCriterion
 
 
 class BEVTransform:
@@ -93,11 +92,9 @@ class MapTR(nn.Module):
         self.grid_mask = GridMask(use_grid_mask=True)
         self.bev_encoder = BEVFormerEncoder(cfg.bev_encoder)
 
-        assert cfg.map_det_head.type == 'maptr'
-        self.head = MapTRHead(cfg.map_det_head)
+        self.head = MapTRHead(cfg.map_det_head) if cfg.map_det_head.get('enabled', True) else None
         self.seg_head = MapSegHead(cfg.map_seg_head) if cfg.map_seg_head.get('enabled', True) else None
         self.heatmap_head = BEVHeatMapHead(cfg.heatmap_head) if cfg.heatmap_head.get('enabled', True) else None
-        self.criterion = MapTRCriterion(cfg.loss)
 
         pc = cfg.bev_encoder.pc_range
         self.bev_transform = BEVTransform(
@@ -107,7 +104,7 @@ class MapTR(nn.Module):
             y_center=float((pc[4] + pc[1]) / 2),
         )
 
-    def forward(self, imgs, intrinsics, extrinsics, seg_only=False, batch=None,
+    def forward(self, imgs, intrinsics, extrinsics, batch=None,
                 return_all_layers=False):
         batch_size, num_cams, C, H, W = imgs.shape
 
@@ -126,30 +123,21 @@ class MapTR(nn.Module):
                 dy=batch.get('dy'),
             )
 
-        if not seg_only:
+        cls_scores, reg_preds = None, None
+        if self.head is not None:
             cls_scores, reg_preds = self.head(bev_feat, return_all_layers=return_all_layers)
-        else:
-            cls_scores = None
-            reg_preds = None
 
         seg_pred = self.seg_head(bev_feat) if self.seg_head else None
         heatmap_pred = self.heatmap_head(bev_feat) if self.heatmap_head else None
 
         return cls_scores, reg_preds, seg_pred, heatmap_pred, bev_feat
 
-    def compute_loss(self, cls_scores, reg_preds, seg_preds, batch, seg_only=False, heatmap_pred=None):
-        sem_mask = batch.get('semantic_mask')
-        if sem_mask is not None and seg_preds is not None:
-            sem_mask = sem_mask.to(seg_preds.device)
-        soft_heatmap = batch.get('soft_heatmap')
-        if soft_heatmap is not None and heatmap_pred is not None:
-            soft_heatmap = soft_heatmap.to(heatmap_pred.device)
-        return self.criterion(
-            cls_scores, reg_preds,
-            batch['vectors'],
-            sem_mask,
-            seg_preds,
-            gt_heatmap=soft_heatmap,
-            heatmap_pred=heatmap_pred,
-            seg_only=seg_only,
-        )
+    def compute_loss(self, cls_scores, reg_preds, seg_preds, batch, heatmap_pred=None):
+        loss_dict = {}
+        if self.head is not None and cls_scores is not None:
+            loss_dict.update(self.head.loss(cls_scores, reg_preds, batch['vectors']))
+        if self.seg_head is not None and seg_preds is not None and batch.get('semantic_mask') is not None:
+            loss_dict.update(self.seg_head.loss(seg_preds, batch['semantic_mask']))
+        if self.heatmap_head is not None and heatmap_pred is not None and batch.get('soft_heatmap') is not None:
+            loss_dict.update(self.heatmap_head.loss(heatmap_pred, batch['soft_heatmap']))
+        return loss_dict
