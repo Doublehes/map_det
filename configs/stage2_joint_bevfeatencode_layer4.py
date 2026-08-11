@@ -15,9 +15,13 @@ config_default = AttrDict(copy.deepcopy(base_cfg))
 config_default.model.map_det_head.enabled = True
 config_default.model.map_seg_head.enabled = True
 config_default.model.heatmap_head.enabled = False
+config_default.model.map_det_head.bev_feat_net.enabled = True
+config_default.model.map_det_head.bev_feat_net.num_layers = 4
 
 config_default.freeze_modules = ['backbone.', 'bev_encoder.', 'seg_head.', 'heatmap_head.']
 
+# ── 数据 ──
+config_default.data.batch_size = 4
 # ── 数据 ──
 config_default.data.batch_size = 4
 config_default.data.bev_flip_prob = 0.5

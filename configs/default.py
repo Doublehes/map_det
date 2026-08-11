@@ -42,8 +42,8 @@ num_points = 16
 data = AttrDict({
     # ── 数据 ──
     'data_root': "/home/double/Documents/wangjiang/line_data",
-    'train_ann_file': "/home/double/Documents/wangjiang/line_data/dctj218_yubei.pkl",
-    'val_ann_file': "/home/double/Documents/wangjiang/line_data/dctj218_yubei_sampled_330.pkl",
+    'train_ann_file': "/home/double/Documents/wangjiang/line_data/trainlabel_sampled_2082.pkl",
+    'val_ann_file': "/home/double/Documents/wangjiang/line_data/trainlabel_sampled_209.pkl",
     'cat2id': cat2id,
     'num_classes': num_classes,
     'num_points': num_points,
@@ -62,10 +62,10 @@ data = AttrDict({
     'num_workers': num_workers,
 
     # ######### bev augmentation #########
-    'bev_flip_prob': 0.5,    # BEV 左右翻转概率, 0=关闭, 0.5=50%
+    'bev_flip_prob': 0.0,    # BEV 左右翻转概率, 0=关闭, 0.5=50%
     'bev_rot_angle': 0.0,    # BEV 最大旋转角度(度), 0=关闭
     'bev_trans_x': 0.0,       # BEV 最大平移距离(米), x方向, 0=关闭
-    'bev_trans_y': 3.0,       # BEV 最大平移距离(米), y方向, 0=关闭
+    'bev_trans_y': 0.0,       # BEV 最大平移距离(米), y方向, 0=关闭
 })
 
 num_feat_levels = 2
