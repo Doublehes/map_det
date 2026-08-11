@@ -175,6 +175,13 @@ def draw_mask_panel(panel, mask, title, flip_v=False, colors=None):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
 
+def draw_disabled_panel(panel, title):
+    """占位面板: 灰底 + 提示文本, 用于被禁用的 head 槽位"""
+    panel[:] = (40, 40, 40)
+    cv2.putText(panel, title, (8, 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
+
+
 def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
                     cam_names, start_y, cam_w, cam_h, gap):
     mean = np.array(cfg.data.img_norm['mean'], dtype=np.float32)
@@ -437,6 +444,10 @@ def infer():
     model.eval()
     print(f'[加载] {args.checkpoint} epoch={ckpt.get("epoch", "?")}')
 
+    has_det = model.head is not None
+    has_seg = model.seg_head is not None
+    has_heat = model.heatmap_head is not None
+
     pw, ph = 520, 260
     gap = 15
     cw = pw
@@ -457,26 +468,36 @@ def infer():
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         if args.vis_layers:
-            cls_all, reg_all, _, _, _ = model(imgs, intrinsics, extrinsics,
-                                              batch=batch, return_all_layers=True)
-            sample = ds.samples[batch_idx]
-            gt_raw = vectors_to_world(
-                batch['vectors'][0], cfg.data.roi_size, cfg.data.pc_range[0], cfg.data.pc_range[1])
-            layer_out = save_dir / f'infer_{batch_idx:04d}_layers.png'
-            render_layers_bev(gt_raw, cls_all, reg_all, cfg.data.pc_range,
-                              cfg.data.roi_size, args.score_thresh, layer_out, batch_idx)
-            rendered += 1
-            continue
+            if not has_det:
+                print('[警告] 检测头已禁用, 跳过 --vis-layers 可视化')
+            else:
+                cls_all, reg_all, _, _, _ = model(imgs, intrinsics, extrinsics,
+                                                  batch=batch, return_all_layers=True)
+                sample = ds.samples[batch_idx]
+                gt_raw = vectors_to_world(
+                    batch['vectors'][0], cfg.data.roi_size, cfg.data.pc_range[0], cfg.data.pc_range[1])
+                layer_out = save_dir / f'infer_{batch_idx:04d}_layers.png'
+                render_layers_bev(gt_raw, cls_all, reg_all, cfg.data.pc_range,
+                                  cfg.data.roi_size, args.score_thresh, layer_out, batch_idx)
+                rendered += 1
+                continue
 
         cls_scores, reg_preds, seg_preds, heatmap_pred, bev_feat = model(imgs, intrinsics, extrinsics, batch=batch)
 
-        gt_seg_mask = batch['semantic_mask'][0].numpy()  # (num_classes, 80, 160)
-        pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)
-        gt_heatmap = batch['soft_heatmap'][0].numpy()            # (1, 80, 160)
-        pred_heatmap = heatmap_pred[0].sigmoid().cpu().numpy()    # (1, 80, 160)
+        pred_lines, pred_scores = {0: [], 1: []}, {0: [], 1: []}
+        if has_det:
+            pred_lines, pred_scores = decode_predictions(
+                cls_scores[0], reg_preds[0], cfg.data.roi_size, cfg.data.pc_range, args.score_thresh)
 
-        pred_lines, pred_scores = decode_predictions(
-            cls_scores[0], reg_preds[0], cfg.data.roi_size, cfg.data.pc_range, args.score_thresh)
+        gt_seg_mask = pred_seg_mask = None
+        if has_seg:
+            gt_seg_mask = batch['semantic_mask'][0].numpy()  # (num_classes, 80, 160)
+            pred_seg_mask = seg_preds[0].sigmoid().cpu().numpy()  # (num_classes, 80, 160)
+
+        gt_heatmap = pred_heatmap = None
+        if has_heat:
+            gt_heatmap = batch['soft_heatmap'][0].numpy()            # (1, 80, 160)
+            pred_heatmap = heatmap_pred[0].sigmoid().cpu().numpy()    # (1, 80, 160)
 
         sample = ds.samples[batch_idx]
         gt_raw = vectors_to_world(
@@ -489,13 +510,19 @@ def infer():
         draw_bev_panel(canvas[:ph, :pw], cfg.data.pc_range, gt_raw, pred_lines)
 
         # GT 掩码面板
-        draw_mask_panel(canvas[:ph, pw + gap:pw * 2 + gap],
-                        gt_seg_mask, 'GT Mask', flip_v=False)
+        if has_seg:
+            draw_mask_panel(canvas[:ph, pw + gap:pw * 2 + gap],
+                            gt_seg_mask, 'GT Mask', flip_v=False)
+        else:
+            draw_disabled_panel(canvas[:ph, pw + gap:pw * 2 + gap], 'Seg head disabled')
 
         # Pred 掩码面板 (已经是 BEV 坐标，不 flip)
-        pred_binary = (pred_seg_mask > args.seg_thresh).astype(np.float32)
-        draw_mask_panel(canvas[:ph, pw * 2 + gap * 2:pw * 3 + gap * 2],
-                        pred_binary, f'Pred Mask  >{args.seg_thresh}', flip_v=False)
+        if has_seg:
+            pred_binary = (pred_seg_mask > args.seg_thresh).astype(np.float32)
+            draw_mask_panel(canvas[:ph, pw * 2 + gap * 2:pw * 3 + gap * 2],
+                            pred_binary, f'Pred Mask  >{args.seg_thresh}', flip_v=False)
+        else:
+            draw_disabled_panel(canvas[:ph, pw * 2 + gap * 2:pw * 3 + gap * 2], 'Seg head disabled')
 
         # 标题行
         title = f'idx={batch_idx}  token={sample["token"][:16]}  score>{args.score_thresh}  seg>{args.seg_thresh}  {scale_tag}'
@@ -507,29 +534,30 @@ def infer():
                         gt_raw, pred_lines, cam_names,
                         start_y=ph + gap, cam_w=cw, cam_h=ch, gap=gap)
 
-        # 热力图
-        heat_show = render_heatmap_pair(
-            gt_heatmap=gt_heatmap[0],
-            pred_heatmap=pred_heatmap[0],
-            gt_lines=gt_raw,
-            pred_lines=pred_lines,
-            pc_range=cfg.data.pc_range,
-            save_path="",
-            idx=batch_idx,
-            score_thresh=args.score_thresh,
-        )
-
         flip_flag = batch['flip'][0].item() if 'flip' in batch else False
         rot_deg = np.degrees(batch['rot_angle'][0].item())
         dx_val = batch['dx'][0].item() if 'dx' in batch else 0.0
         dy_val = batch['dy'][0].item() if 'dy' in batch else 0.0
 
-        hh, hw = heat_show.shape[:2]
-        new_h = canvas.shape[0]
-        new_w = int(hw * new_h / hh)
-        heat_resized = cv2.resize(heat_show, (new_w, new_h))
+        # 热力图 (仅 heatmap head 启用时)
+        result = canvas
+        if has_heat:
+            heat_show = render_heatmap_pair(
+                gt_heatmap=gt_heatmap[0],
+                pred_heatmap=pred_heatmap[0],
+                gt_lines=gt_raw,
+                pred_lines=pred_lines,
+                pc_range=cfg.data.pc_range,
+                save_path="",
+                idx=batch_idx,
+                score_thresh=args.score_thresh,
+            )
+            hh, hw = heat_show.shape[:2]
+            new_h = result.shape[0]
+            new_w = int(hw * new_h / hh)
+            heat_resized = cv2.resize(heat_show, (new_w, new_h))
+            result = np.concatenate([result, heat_resized], axis=1)
 
-        result = np.concatenate([canvas, heat_resized], axis=1)
         cv2.putText(result, f'flip={int(flip_flag)} rot={rot_deg:.1f} tx={dx_val:.2f} ty={dy_val:.2f}',
                     (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 1)
 
