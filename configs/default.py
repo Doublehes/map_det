@@ -63,9 +63,9 @@ data = AttrDict({
 
     # ######### bev augmentation #########
     'bev_flip_prob': 0.5,    # BEV 左右翻转概率, 0=关闭, 0.5=50%
-    'bev_rot_angle': 70.0,    # BEV 最大旋转角度(度), 0=关闭
+    'bev_rot_angle': 0.0,    # BEV 最大旋转角度(度), 0=关闭
     'bev_trans_x': 0.0,       # BEV 最大平移距离(米), x方向, 0=关闭
-    'bev_trans_y': 0.0,       # BEV 最大平移距离(米), y方向, 0=关闭
+    'bev_trans_y': 3.0,       # BEV 最大平移距离(米), y方向, 0=关闭
 })
 
 num_feat_levels = 2
@@ -114,6 +114,14 @@ model = AttrDict({
         'num_decoder_layers': 1,
         'dropout': 0.1,
         'ffn_channels': 512,
+
+        'bev_feat_net': AttrDict({
+            'enabled': False,     # 默认关闭, 需显式开启
+            'type': 'residual',   # 目前仅支持 residual
+            'num_layers': 2,      # 残差块数量
+            'hidden_dims': 256,   # 建议 = embed_dims, 不等时末端自动加 1x1 投影
+        }),
+
         'matcher_cls_weight': 5.0,
         'matcher_reg_weight': 50.0,
         'loss_cls_weight': 5.0,
@@ -121,6 +129,7 @@ model = AttrDict({
         'focal_gamma': 2.0,
         'focal_alpha': 0.25,
         'l1_beta': 0.01,
+
     }),
     'map_seg_head': AttrDict({
         'enabled': True,

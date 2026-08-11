@@ -38,6 +38,24 @@ class SinePositionalEncoding(nn.Module):
         return pos
 
 
+class ResidualBlock(nn.Module):
+    """Conv3x3-BN-ReLU-Conv3x3-BN + skip connection, 保持分辨率与通道数"""
+
+    def __init__(self, dims):
+        super().__init__()
+        self.conv1 = nn.Conv2d(dims, dims, 3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(dims)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(dims, dims, 3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(dims)
+
+    def forward(self, x):
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return self.relu(out + identity)
+
+
 class MapTRHead(nn.Module):
     """检测头: BEV position encoding + query + reference points + transformer decoder + cls/reg"""
 
@@ -52,6 +70,17 @@ class MapTRHead(nn.Module):
         # BEV position encoding
         self.bev_pos_embed = SinePositionalEncoding(self.embed_dims // 2, normalize=True)
         self.input_proj = nn.Conv2d(self.bev_embed_dims, self.embed_dims, kernel_size=1)
+
+        # BEV 特征提取网络 (残差块), 默认关闭
+        self.bev_feat_net = None
+        net_cfg = getattr(cfg, 'bev_feat_net', None)
+        if net_cfg is not None and net_cfg.get('enabled', False):
+            assert net_cfg.type == 'residual', f'不支持的 bev_feat_net type: {net_cfg.type}'
+            hid = net_cfg.hidden_dims
+            blocks = [ResidualBlock(hid) for _ in range(net_cfg.num_layers)]
+            if hid != self.embed_dims:
+                blocks.append(nn.Conv2d(hid, self.embed_dims, 1))
+            self.bev_feat_net = nn.Sequential(*blocks)
 
         # query
         self.query_embedding = nn.Embedding(self.num_queries, self.embed_dims)
@@ -103,7 +132,10 @@ class MapTRHead(nn.Module):
         B, C, H, W = bev_features.shape
         bev_mask = bev_features.new_zeros(B, H, W, dtype=torch.bool)
         pos_embed = self.bev_pos_embed(bev_mask)
-        bev_embed = self.input_proj(bev_features) + pos_embed
+        x = self.input_proj(bev_features)
+        if self.bev_feat_net is not None:
+            x = self.bev_feat_net(x)
+        bev_embed = x + pos_embed
         return bev_embed
 
     def forward(self, bev_feat, return_all_layers=False):
