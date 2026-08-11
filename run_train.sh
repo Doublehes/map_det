@@ -1,23 +1,13 @@
 #!/bin/bash
 set -e
 
-STAGE1_DIR="./work_dirs/maptr_stage1"
-STAGE2_DIR="./work_dirs/maptr_stage2"
-PRETRAINED=""    # 用户自行填入 backbone 预训练权重路径, e.g. ./pretrained/resnet50.pth
+# 所有训练参数均在 config 中配置 (work_dir / pretrained / freeze_backbone / num_epochs 等)
+# backbone 预训练权重路径在 configs/stage1_seg_pretrain.py 的 pretrained 字段填写
 
-# Stage 1: 分割预训练 (map_det_head.enabled=False, 仅训练 seg_head + bev_encoder, backbone 冻结)
+# Stage 1: 分割预训练 (关闭检测头, 冻结 backbone)
 echo "========== Stage 1: Segment-only pretraining =========="
-python train.py \
-    --work-dir "$STAGE1_DIR" \
-    --pretrained "$PRETRAINED" \
-    --freeze-backbone \
-    --epochs 6 \
-    configs/head_seg_pretrain.py
+python train.py configs/stage1_seg_pretrain.py
 
 # Stage 2: 联合训练 (加载 stage1 权重, 全部参数可训练)
 echo "========== Stage 2: Joint training (seg + cls + reg) =========="
-python train.py \
-    --work-dir "$STAGE2_DIR" \
-    --pretrained "$STAGE1_DIR/latest.pth" \
-    --epochs 36 \
-    configs/head_seg.py
+python train.py configs/stage2_joint.py

@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import argparse
+import pprint
 import numpy as np
 from pathlib import Path
 
@@ -24,6 +25,46 @@ from utils.timer import Timer
 def _get_lr_str(optimizer):
     lrs = sorted(set(round(g['lr'], 8) for g in optimizer.param_groups))
     return 'lr=' + ', '.join(f'{lr:.2e}' for lr in lrs)
+
+
+def _to_plain(obj):
+    """递归转换 AttrDict/tuple → 可 repr 的结构 (torch.device → str)"""
+    if isinstance(obj, dict):
+        return {k: _to_plain(v) for k, v in obj.items()}
+    if isinstance(obj, torch.device):
+        return str(obj)
+    if isinstance(obj, tuple):
+        return tuple(_to_plain(v) for v in obj)
+    if isinstance(obj, list):
+        return [_to_plain(v) for v in obj]
+    return obj
+
+
+def dump_config(cfg, src_path, work_dir):
+    """将解析后的完整配置 (含继承字段) 序列化为可重新加载的 config.py 写入 work_dir"""
+    os.makedirs(work_dir, exist_ok=True)
+    body = pprint.pformat(_to_plain(cfg), width=120, sort_dicts=False)
+    content = '\n'.join([
+        '# ===== 解析后的完整配置 (含继承字段) =====',
+        f'# 原始配置: {os.path.abspath(src_path)}',
+        '# 自动生成, 可被 load_config 重新加载',
+        '',
+        'import torch',
+        'from configs.default import AttrDict',
+        '',
+        'def _from_dict(d):',
+        '    return AttrDict({k: (_from_dict(v) if isinstance(v, dict) else v) for k, v in d.items()})',
+        '',
+        'config_default = _from_dict(',
+        body,
+        ')',
+        '',
+        'config_default.device = torch.device(config_default.device)',
+        '',
+    ])
+    with open(os.path.join(work_dir, 'config.py'), 'w', encoding='utf-8') as f:
+        f.write(content)
+    print(f'[配置] 已保存解析后的完整配置到: {os.path.join(work_dir, "config.py")}')
 
 
 def build_optimizer(model, cfg):
@@ -155,20 +196,19 @@ def load_pretrained(model, checkpoint_path, cfg, freeze_backbone=False):
 
 def main():
     parser = argparse.ArgumentParser(description='MapTR 道路结构线检测训练')
-    parser.add_argument('--work-dir', type=str, default='./work_dirs/maptr', help='工作目录')
-    parser.add_argument('--resume', type=str, default=None, help='恢复训练的 checkpoint')
-    parser.add_argument('--pretrained', type=str, default=None, help='预训练权重 (仅加载模型, 从epoch0开始)')
-    parser.add_argument('--freeze-backbone', action='store_true', help='冻结backbone只训练其余部分')
-    parser.add_argument('--epochs', type=int, default=None, help='覆盖 cfg.num_epochs')
-    parser.add_argument('config', type=str, help='配置文件路径')
-    parser.add_argument('--eval-interval', type=int, default=1, help='每 N 个 epoch 执行一次评测 (0=禁用)')
+    parser.add_argument('config', type=str, help='配置文件路径 (所有参数均从 config 读取)')
     args = parser.parse_args()
 
     from configs.loader import load_config
     cfg = load_config(args.config)
 
-    if args.epochs is not None:
-        cfg.num_epochs = args.epochs
+    # 未指定 work_dir 时, 以配置文件名为 work_dir
+    if not cfg.work_dir:
+        cfg.work_dir = os.path.join('./work_dirs', Path(args.config).stem)
+        print(f'[工作目录] 未指定 work_dir, 使用配置文件名: {cfg.work_dir}')
+
+    # 保存解析后的完整配置 (含继承字段) 到工作目录
+    dump_config(cfg, args.config, cfg.work_dir)
 
     print(f'[设备] {cfg.device}')
     print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.data.batch_size}')
@@ -211,8 +251,8 @@ def main():
     # print(model)
     start_epoch = 0
 
-    if args.pretrained and os.path.exists(args.pretrained):
-        load_pretrained(model, args.pretrained, cfg, args.freeze_backbone)
+    if cfg.pretrained and os.path.exists(cfg.pretrained):
+        load_pretrained(model, cfg.pretrained, cfg, cfg.freeze_backbone)
 
     freeze_modules = getattr(cfg, 'freeze_modules', [])
     if freeze_modules:
@@ -246,9 +286,9 @@ def main():
         else:
             scheduler = main_lr_scheduler
 
-    if args.resume and os.path.exists(args.resume):
-        print(f'[恢复] 从 {args.resume} 恢复训练')
-        checkpoint = torch.load(args.resume, map_location=cfg.device)
+    if cfg.resume and os.path.exists(cfg.resume):
+        print(f'[恢复] 从 {cfg.resume} 恢复训练')
+        checkpoint = torch.load(cfg.resume, map_location=cfg.device)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
@@ -257,7 +297,7 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'[模型] 总参数: {total_params/1e6:.2f}M, 可训练: {trainable_params/1e6:.2f}M')
 
-    writer = SummaryWriter(log_dir=os.path.join(args.work_dir, 'logs'))
+    writer = SummaryWriter(log_dir=os.path.join(cfg.work_dir, 'logs'))
     timer = Timer()
     global_step = 0
     for epoch in range(start_epoch, cfg.num_epochs):
@@ -265,11 +305,11 @@ def main():
             model, train_loader, optimizer, scheduler, epoch, cfg,
             writer=writer, global_step=global_step)
         
-        save_checkpoint(model, optimizer, epoch, cfg, args.work_dir, filename='latest.pth')
+        save_checkpoint(model, optimizer, epoch, cfg, cfg.work_dir, filename='latest.pth')
         if (epoch + 1) % cfg.checkpoint_interval == 0:
-            save_checkpoint(model, optimizer, epoch, cfg, args.work_dir)
+            save_checkpoint(model, optimizer, epoch, cfg, cfg.work_dir)
 
-        if model.head is not None and args.eval_interval > 0 and (epoch + 1) % args.eval_interval == 0:
+        if model.head is not None and cfg.eval_interval > 0 and (epoch + 1) % cfg.eval_interval == 0:
             print(f'\n{"="*50}\n[评测] Epoch {epoch+1}')
             model.eval()
             with timer('评测整体'):

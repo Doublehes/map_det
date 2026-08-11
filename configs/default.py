@@ -170,15 +170,20 @@ config_default = AttrDict({
     'min_lr_ratio': 1e-2,
     'log_interval': 50,
 
+    # ── 训练入口配置 (原 CLI 参数) ──
+    'work_dir': '',          # 空=未指定, train.py 自动以配置文件名为 work_dir
+    'pretrained': '',        # 预训练权重路径, 空=不加载
+    'freeze_backbone': False,  # 冻结 backbone
+    'resume': '',            # 恢复训练的 checkpoint, 空=不恢复
+    'eval_interval': 1,      # 每 N 个 epoch 评测一次
+    'checkpoint_interval': 6,  # 每 N 个 epoch 保存一次 checkpoint
+
     # ── 冻结配置 ──
     'freeze_modules': [],   # 冻结的模块前缀列表, 空=不冻结. 例: ['backbone.', 'bev_encoder.', 'seg_head.', 'heatmap_head.'] = 只训练检测头
 
     # ── 评测 ──
     'score_thr': 0.3,
     'eval_thresholds': [0.5, 1.0, 1.5],
-    
-    # ── 检查点配置 ──
-    'checkpoint_interval': 6
 })
 
 # 派生字段
