@@ -8,8 +8,8 @@ cfg_default = AttrDict({
     'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
 
     'data': AttrDict({
-        'train_ann_file': '/home/double/Documents/wangjiang/line_data/dctj218_yubei.pkl',
-        'val_ann_file': '/home/double/Documents/wangjiang/line_data/trainlabel_sampled_209.pkl',
+        'train_ann_file': '/home/double/Documents/wangjiang/line_data/original_label/label_I5_S0__dctj218_yubei__tms_dazu_20260416__len2471.pkl',
+        'val_ann_file': '/home/double/Documents/wangjiang/line_data/original_label/label_I100_S5__dctj218_yubei__tms_dazu_20260416__x30_jialing_20260612__x30_jialing_road__len230.pkl',
         'pc_range': [-10, -10, -3, 30, 10, 5],
         'num_classes': 2,
         'num_points': 16,
@@ -24,10 +24,11 @@ cfg_default = AttrDict({
             'eval': True,           # 推理/评测时加
         }),
         # 线增强 (训练时对 3D 线做变换, 栅格与 GT 同源生成, 天然一致)
-        'bev_flip_prob': 0.5,   # 左右翻转概率 (y 反射), 0=关闭
-        'bev_rot_angle': 10.0,  # 最大旋转角度(度), 0=关闭
+        'bev_flip_prob': 0.0,   # 左右翻转概率 (y 反射), 0=关闭
+        'bev_rot_angle': 0.0,  # 最大旋转角度(度), 0=关闭
+        'bev_scale': 0.0,      # 尺度变换幅度: 系数 ∈ [1-0.15, 1+0.15], 0=关闭
         'bev_trans_x': 0.0,     # x 方向最大平移(米), 0=关闭
-        'bev_trans_y': 3.0,     # y 方向最大平移(米), 0=关闭
+        'bev_trans_y': 0.0,     # y 方向最大平移(米), 0=关闭
         'batch_size': 16,
         'num_workers': 4,
     }),
@@ -93,11 +94,40 @@ cfg_resnet34 = deepcopy(cfg_default)
 cfg_resnet34['backbone']['depth'] = 34
 cfg_resnet34['work_dir'] = './work_dirs/resnet34'
 
+cfg_argument1 = deepcopy(cfg_default)
+cfg_argument1['data']['bev_flip_prob'] = 0.5
+cfg_argument1['data']['bev_rot_angle'] = 10.0
+cfg_argument1['data']['bev_scale'] = 0.15
+cfg_argument1['data']['bev_trans_x'] = 0.0
+cfg_argument1['data']['bev_trans_y'] = 1.0
+cfg_argument1['work_dir'] = './work_dirs/argument1'
+
+cfg_argument2 = deepcopy(cfg_default)
+cfg_argument2['data']['bev_flip_prob'] = 0.5
+cfg_argument2['data']['bev_rot_angle'] = 30.0
+cfg_argument2['data']['bev_scale'] = 0.5
+cfg_argument2['data']['bev_trans_x'] = 5.0
+cfg_argument2['data']['bev_trans_y'] = 3.0
+cfg_argument2['work_dir'] = './work_dirs/argument2'
+
+cfg_argu2_dlayer3 = deepcopy(cfg_argument2)
+cfg_argu2_dlayer3['map_det_head']['num_decoder_layers'] = 3
+cfg_argu2_dlayer3['work_dir'] = './work_dirs/argument2_dlayer3'
+
+cfg_argu2_res34 = deepcopy(cfg_argument2)
+cfg_argu2_res34['backbone']['depth'] = 34
+cfg_argu2_res34['work_dir'] = './work_dirs/argument2_res34'
+
+
 # 配置变体注册表 (train.py / infer.py 通过 --config 选择)
 CONFIGS = {
     'default': cfg_default,
     'resnet34': cfg_resnet34,
     'decode_layer3': cfg_decode_layer3,
+    'argument1': cfg_argument1,
+    'argument2': cfg_argument2,
+    'argument2_dlayer3': cfg_argu2_dlayer3,
+    'argument2_res34': cfg_argu2_res34,
 }
 
 cfg = deepcopy(cfg_default)

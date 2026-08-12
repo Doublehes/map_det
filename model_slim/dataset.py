@@ -124,6 +124,18 @@ class SlimDataset(Dataset):
                         pt[0] = x * c - y * s
                         pt[1] = x * s + y * c
 
+        scale = getattr(self.cfg, 'bev_scale', 0.0)
+        if scale > 0 and random.random() < 0.5:
+            s = random.uniform(1.0 - scale, 1.0 + scale)
+            if not need_copy:
+                sample = copy.deepcopy(sample)
+                need_copy = True
+            for cls_id in sample['map_geom']:
+                for line in sample['map_geom'][cls_id]:
+                    for pt in line:
+                        pt[0] *= s
+                        pt[1] *= s
+
         trans_x = getattr(self.cfg, 'bev_trans_x', 0.0)
         trans_y = getattr(self.cfg, 'bev_trans_y', 0.0)
         if (trans_x > 0 or trans_y > 0) and random.random() < 0.5:
