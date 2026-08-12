@@ -68,6 +68,8 @@ cfg_default = AttrDict({
         'focal_gamma': 2.0,
         'focal_alpha': 0.25,
         'l1_beta': 0.01,
+        'aux_loss': False,   # 多层解码时是否每层监督, 需显式开启
+        'aux_weight': 1.0,   # 中间层损失权重, 最后一层恒为 1.0
     }),
 
     'num_epochs': 48,
@@ -119,6 +121,15 @@ cfg_argu2_res34['backbone']['depth'] = 34
 cfg_argu2_res34['work_dir'] = './work_dirs/argument2_res34'
 
 
+cfg_argu2_dlayer3_no_aux = deepcopy(cfg_argument2)
+cfg_argu2_dlayer3_no_aux['map_det_head']['num_decoder_layers'] = 3
+cfg_argu2_dlayer3_no_aux['work_dir'] = './work_dirs/argument2_dlayer3_no_aux'
+
+cfg_argu2_dlayer3_aux = deepcopy(cfg_argument2)
+cfg_argu2_dlayer3_aux['map_det_head']['num_decoder_layers'] = 3
+cfg_argu2_dlayer3_aux['map_det_head']['aux_loss'] = True
+cfg_argu2_dlayer3_aux['work_dir'] = './work_dirs/argument2_dlayer3_aux'
+
 # 配置变体注册表 (train.py / infer.py 通过 --config 选择)
 CONFIGS = {
     'default': cfg_default,
@@ -128,6 +139,8 @@ CONFIGS = {
     'argument2': cfg_argument2,
     'argument2_dlayer3': cfg_argu2_dlayer3,
     'argument2_res34': cfg_argu2_res34,
+    'argument2_dlayer3_no_aux': cfg_argu2_dlayer3_no_aux,
+    'argument2_dlayer3_aux': cfg_argu2_dlayer3_aux,
 }
 
 cfg = deepcopy(cfg_default)

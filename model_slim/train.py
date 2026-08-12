@@ -101,7 +101,7 @@ def main():
         t0 = time.time()
         for batch_idx, batch in enumerate(train_loader):
             raster = batch['raster'].to(cfg.device)
-            cls_scores, reg_preds, _ = model(raster)
+            cls_scores, reg_preds, _ = model(raster, return_all_layers=True)
             loss_dict = model.compute_loss(cls_scores, reg_preds, batch)
             loss = sum(loss_dict.values())
 
@@ -123,8 +123,14 @@ def main():
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], global_step)
 
             if batch_idx % cfg.log_interval == 0:
+                cls_list = model.head.last_layer_cls_losses or []
+                reg_list = model.head.last_layer_reg_losses or []
+                layer_str = '  '.join(
+                    f'L{l}: cls={c.item():.4f} reg={r.item():.4f}'
+                    for l, (c, r) in enumerate(zip(cls_list, reg_list))
+                    if c is not None)
                 print(f'[E {epoch+1}/{cfg.num_epochs}] [{batch_idx}/{len(train_loader)}] '
-                      f'loss={loss.item():.4f} cls={cls_l:.4f} reg={reg_l:.4f}')
+                      f'loss={loss.item():.4f} cls={cls_l:.4f} reg={reg_l:.4f} | {layer_str}')
 
         avg_loss = total_loss / len(train_loader)
         print(f'[Epoch {epoch+1}] 平均 loss={avg_loss:.4f} 耗时={time.time()-t0:.0f}s')

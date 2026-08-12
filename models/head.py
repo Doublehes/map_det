@@ -115,6 +115,13 @@ class MapTRHead(nn.Module):
         self.focal_alpha = cfg.focal_alpha
         self.l1_beta = cfg.l1_beta
 
+        # 逐层 aux 监督 (仅多层解码且 aux_loss=True 时生效)
+        self.aux_loss = cfg.get('aux_loss', False)
+        self.aux_weight = cfg.get('aux_weight', 1.0)
+        # 每层分类/回归损失(贡献值), 供训练打印
+        self.last_layer_cls_losses = None
+        self.last_layer_reg_losses = None
+
         self.init_weights()
 
     def init_weights(self):
@@ -183,16 +190,51 @@ class MapTRHead(nn.Module):
 
         return cls_scores, reg_preds
 
+    def _layer_loss(self, cls_scores, reg_preds, gt_labels_list, gt_lines_list, indices, bs):
+        """单层 cls/reg 损失 (sum), 各层共享同一匈牙利匹配 indices"""
+        total_cls = 0.0
+        total_reg = 0.0
+        for i in range(bs):
+            pred_idx, tgt_idx = indices[i][:2]
+            best_perm = indices[i][2] if len(indices[i]) > 2 else None
+            num_q, num_cls = cls_scores.shape[1], cls_scores.shape[2]
+
+            # 所有 query 的 cls target: 负样本全0, 正样本 one-hot
+            cls_target = cls_scores[i].new_zeros(num_q, num_cls)
+
+            if len(pred_idx) > 0:
+                tgt_cls = gt_labels_list[i][tgt_idx]
+                cls_target[pred_idx, tgt_cls] = 1.0
+
+                matched_reg = reg_preds[i, pred_idx]
+                tgt_lines = gt_lines_list[i][tgt_idx]
+                if best_perm is not None and tgt_lines.dim() == 4:
+                    M = len(pred_idx)
+                    tgt_lines = tgt_lines[torch.arange(M, device=tgt_lines.device), best_perm]
+                total_reg += l1_loss(matched_reg, tgt_lines, self.l1_beta)
+
+            # cls loss: 所有 query 都计算, 负样本被推向全0
+            total_cls += focal_loss(
+                cls_scores[i], cls_target, self.focal_gamma, self.focal_alpha, reduction='sum')
+        return total_cls, total_reg
+
     def loss(self, cls_scores, reg_preds, gt_vectors):
         """Hungarian 匹配后计算分类 FocalLoss + 回归 SmoothL1Loss
 
+        支持多层(aux): cls_scores/reg_preds 可为 list(每层一组); 匹配用最后一层, 各层共享 indices.
         gt_vectors: list of dict {cls_id: (N, 1|2, num_points, 2)}, 长度 = batch_size
         Returns:
             {'cls_loss': Tensor, 'reg_loss': Tensor}
         """
-        loss_dict = {}
+        is_aux = isinstance(cls_scores, (list, tuple))
+        cls_all = list(cls_scores) if is_aux else [cls_scores]
+        reg_all = list(reg_preds) if is_aux else [reg_preds]
+        num_layers = len(cls_all)
+        if is_aux:
+            assert len(reg_all) == num_layers, 'cls_scores 与 reg_preds 层数须一致'
+
         bs = len(gt_vectors)
-        device = cls_scores.device
+        device = cls_all[-1].device
 
         # 1. 展平GT: 将各个类别的线合并为统一的列表
         gt_labels_list, gt_lines_list = [], []
@@ -213,48 +255,53 @@ class MapTRHead(nn.Module):
             gt_labels_list.append(torch.tensor(labels, device=device, dtype=torch.long))
             gt_lines_list.append(torch.stack(lines, dim=0))
 
-        # 2. Hungarian匹配: 每个query匹配到最优GT线
-        indices = self.matcher(cls_scores, reg_preds, gt_labels_list, gt_lines_list)
+        # 2. Hungarian匹配: 用最后一层
+        indices = self.matcher(cls_all[-1], reg_all[-1], gt_labels_list, gt_lines_list)
 
-        # 3. 计算匹配后的损失
-        total_cls_loss = 0.0
-        total_reg_loss = 0.0
-        num_matched = 0
+        # 3. 各层权重: 默认只监督最后一层; aux_loss=True 时中间层加权
+        weights = [0.0] * num_layers
+        weights[-1] = 1.0
+        if is_aux and self.aux_loss:
+            for l in range(num_layers - 1):
+                weights[l] = self.aux_weight
 
-        for i in range(bs):
-            pred_idx, tgt_idx = indices[i][:2]
-            best_perm = indices[i][2] if len(indices[i]) > 2 else None
-            num_q, num_cls = cls_scores.shape[1], cls_scores.shape[2]
+        # 4. 逐层损失, 加权求和
+        num_matched = sum(len(indices[i][0]) for i in range(bs))
+        sum_cls = 0.0
+        sum_reg = 0.0
+        layer_cls_list = []
+        layer_reg_list = []
+        for l in range(num_layers):
+            if weights[l] == 0.0:
+                layer_cls_list.append(None)
+                layer_reg_list.append(None)
+                continue
+            sc, sr = self._layer_loss(
+                cls_all[l], reg_all[l], gt_labels_list, gt_lines_list, indices, bs)
+            sum_cls += weights[l] * sc
+            sum_reg += weights[l] * sr
+            if num_matched > 0:
+                layer_cls_list.append(
+                    (self.loss_cls_weight * weights[l] * sc / num_matched).detach())
+                layer_reg_list.append(
+                    (self.loss_reg_weight * weights[l] * sr / num_matched).detach())
+            else:
+                layer_cls_list.append(cls_all[-1].mean().detach() * 0.0)
+                layer_reg_list.append(reg_all[-1].mean().detach() * 0.0)
 
-            # 所有 query 的 cls target: 负样本全0, 正样本 one-hot
-            cls_target = cls_scores[i].new_zeros(num_q, num_cls)
+        self.last_layer_cls_losses = layer_cls_list
+        self.last_layer_reg_losses = layer_reg_list
 
-            if len(pred_idx) > 0:
-                tgt_cls = gt_labels_list[i][tgt_idx]
-                cls_target[pred_idx, tgt_cls] = 1.0
-
-                matched_reg = reg_preds[i, pred_idx]
-                tgt_lines = gt_lines_list[i][tgt_idx]
-                if best_perm is not None and tgt_lines.dim() == 4:
-                    M = len(pred_idx)
-                    tgt_lines = tgt_lines[torch.arange(M, device=tgt_lines.device), best_perm]
-                total_reg_loss += l1_loss(matched_reg, tgt_lines, self.l1_beta)
-                num_matched += len(pred_idx)
-
-            # cls loss: 所有 query 都计算, 负样本被推向全0
-            total_cls_loss += focal_loss(
-                cls_scores[i], cls_target, self.focal_gamma, self.focal_alpha, reduction='sum')
-
+        # 5. 归一化
         if num_matched > 0:
-            total_cls_loss = total_cls_loss / num_matched
-            total_reg_loss = total_reg_loss / num_matched
+            sum_cls = sum_cls / num_matched
+            sum_reg = sum_reg / num_matched
         else:
-            total_cls_loss = cls_scores.mean() * 0.0
-            total_reg_loss = reg_preds.mean() * 0.0
+            sum_cls = cls_all[-1].mean() * 0.0
+            sum_reg = reg_all[-1].mean() * 0.0
 
-        loss_dict['cls_loss'] = self.loss_cls_weight * total_cls_loss
-        loss_dict['reg_loss'] = self.loss_reg_weight * total_reg_loss
-        return loss_dict
+        return {'cls_loss': self.loss_cls_weight * sum_cls,
+                'reg_loss': self.loss_reg_weight * sum_reg}
 
 
 class MapSegHead(nn.Module):
