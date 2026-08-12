@@ -130,6 +130,17 @@ cfg_argu2_dlayer3_aux['map_det_head']['num_decoder_layers'] = 3
 cfg_argu2_dlayer3_aux['map_det_head']['aux_loss'] = True
 cfg_argu2_dlayer3_aux['work_dir'] = './work_dirs/argument2_dlayer3_aux'
 
+cfg_argu2_dlayer3_aux_w0_5 = deepcopy(cfg_argument2)
+cfg_argu2_dlayer3_aux_w0_5['map_det_head']['num_decoder_layers'] = 3
+cfg_argu2_dlayer3_aux_w0_5['map_det_head']['aux_loss'] = True
+cfg_argu2_dlayer3_aux_w0_5['map_det_head']['aux_weight'] = 0.5
+cfg_argu2_dlayer3_aux_w0_5['work_dir'] = './work_dirs/argument2_dlayer3_aux_w0.5'
+
+cfg_argu2_dlayer6_aux = deepcopy(cfg_argument2)
+cfg_argu2_dlayer6_aux['map_det_head']['num_decoder_layers'] = 6
+cfg_argu2_dlayer6_aux['map_det_head']['aux_loss'] = True
+cfg_argu2_dlayer6_aux['work_dir'] = './work_dirs/argument2_dlayer6_aux'
+
 # 配置变体注册表 (train.py / infer.py 通过 --config 选择)
 CONFIGS = {
     'default': cfg_default,
@@ -141,6 +152,8 @@ CONFIGS = {
     'argument2_res34': cfg_argu2_res34,
     'argument2_dlayer3_no_aux': cfg_argu2_dlayer3_no_aux,
     'argument2_dlayer3_aux': cfg_argu2_dlayer3_aux,
+    'argument2_dlayer3_aux_w0_5': cfg_argu2_dlayer3_aux_w0_5,
+    'argument2_dlayer6_aux': cfg_argu2_dlayer6_aux,
 }
 
 cfg = deepcopy(cfg_default)

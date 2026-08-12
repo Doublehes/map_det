@@ -102,34 +102,34 @@ def main():
     with torch.no_grad():
         for i, sample in enumerate(ds):
             raster = sample['raster'].unsqueeze(0).to(cfg.device)
-            cls_scores, reg_preds, _ = model(raster)
-            preds = decode_predictions(cls_scores[0], reg_preds[0], SCORE_THRESH)
+            cls_scores_all, reg_preds_all, _ = model(raster, return_all_layers=True)
+            num_layers = len(cls_scores_all)
 
-            inp = sample['raster'].permute(1, 2, 0).numpy()                    # ① 输入(+噪声)
-            gt = draw_lines(sample['vectors'], cfg.data.canvas_size, cfg.data.roi_size)   # ② GT
-            pred = draw_lines(preds, cfg.data.canvas_size, cfg.data.roi_size)            # ③ 预测
-
-            panel = np.concatenate([inp, gt, pred], axis=1) * 255
-            panel = np.clip(panel, 0, 255).astype(np.uint8)
-            h_panel, w_panel = panel.shape[:2]
-            panel = cv2.resize(panel, (w_panel * 4, h_panel * 4),
-                               interpolation=cv2.INTER_NEAREST)
-            col_w = panel.shape[1] // 3
-            cv2.putText(panel, f'Input  (sample {i})', (20, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(panel, f'GT  (sample {i})', (col_w + 20, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(panel, f'Pred  thr={SCORE_THRESH}  (sample {i})', (2 * col_w + 20, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-            h, w = panel.shape[:2]
-            panel = cv2.resize(panel, (int(w / 2), int(h / 2)),
-                               interpolation=cv2.INTER_NEAREST)
-            cv2.imshow('slim infer', panel)
+            inp = sample['raster'].permute(1, 2, 0).numpy()                    # ① 输入(+噪声), 只算一次
+            gt = draw_lines(sample['vectors'], cfg.data.canvas_size, cfg.data.roi_size)   # ② GT, 只算一次
             gt_v = sample['vectors']
-            print(f'[样本 {i}/{len(ds)}] GT: {len(gt_v.get(0, []))}中心/{len(gt_v.get(1, []))}边界  '
-                  f'Pred: {len(preds[0])}中心/{len(preds[1])}边界')
-            cv2.waitKey(0)   # 按任意键查看下一张
+
+            for l in range(num_layers):
+                preds = decode_predictions(cls_scores_all[l][0], reg_preds_all[l][0], SCORE_THRESH)
+                pred = draw_lines(preds, cfg.data.canvas_size, cfg.data.roi_size)            # ③ 该层预测
+
+                panel = np.concatenate([inp, gt, pred], axis=1) * 255
+                panel = np.clip(panel, 0, 255).astype(np.uint8)
+                h_panel, w_panel = panel.shape[:2]
+                panel = cv2.resize(panel, (w_panel * 2, h_panel * 2),
+                                   interpolation=cv2.INTER_NEAREST)
+                col_w = panel.shape[1] // 3
+                cv2.putText(panel, f'Input  (sample {i})', (20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                cv2.putText(panel, f'GT  (sample {i})', (col_w + 20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                cv2.putText(panel, f'Layer {l} Pred  thr={SCORE_THRESH}  (sample {i})',
+                            (2 * col_w + 20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+                cv2.imshow(f'layer L{l}', panel)   # 每层独立窗口
+                print(f'[样本 {i}/{len(ds)}] L{l}: Pred {len(preds[0])}中心/{len(preds[1])}边界')
+            print(f'  GT: {len(gt_v.get(0, []))}中心/{len(gt_v.get(1, []))}边界')
+            cv2.waitKey(0)   # 全部层窗口显示后, 按任意键看下一张
 
     print('[推理完成]')
 

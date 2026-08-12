@@ -5,5 +5,7 @@
 # python train.py --config argument2
 # python train.py --config argument2_dlayer3
 # python train.py --config argument2_res34
-python train.py --config argument2_dlayer3_no_aux
-python train.py --config argument2_dlayer3_aux
+# python train.py --config argument2_dlayer3_no_aux
+# python train.py --config argument2_dlayer3_aux
+python train.py --config argument2_dlayer6_aux
+python train.py --config argument2_dlayer3_aux_w0_5
