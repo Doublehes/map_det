@@ -81,6 +81,9 @@ class MapTransformerDecoder(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
+        # 原始 MapTR 的 BEV 特征 y=1(远)在顶部, 采样前需 y 反转.
+        # 简化版(slim)栅格 y=0 在顶部, 需关闭. 默认 True 保持主模型行为不变.
+        self.y_flip = getattr(cfg, 'y_flip', True)
         self.layers = nn.ModuleList([
             MapTransformerLayer(cfg) for _ in range(cfg.num_decoder_layers)
         ])
@@ -101,9 +104,9 @@ class MapTransformerDecoder(nn.Module):
         intermediate_reference_points = []
 
         for lid, layer in enumerate(self.layers):
-            # y-axis reversal
+            # y-axis reversal: 仅当 BEV 特征 y=1 在顶部时反转 (原始 MapTR)
             tmp = reference_points.clone()
-            tmp[..., 1:2] = 1.0 - reference_points[..., 1:2]
+            tmp[..., 1:2] = (1.0 - reference_points[..., 1:2]) if self.y_flip else reference_points[..., 1:2]
 
             output = layer(
                 output, key, value,
