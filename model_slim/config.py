@@ -29,6 +29,29 @@ cfg_default = AttrDict({
         'bev_scale': 0.0,      # 尺度变换幅度: 系数 ∈ [1-0.15, 1+0.15], 0=关闭
         'bev_trans_x': 0.0,     # x 方向最大平移(米), 0=关闭
         'bev_trans_y': 0.0,     # y 方向最大平移(米), 0=关闭
+
+        # 弯曲增强,sin wave. Y = Y0 + A * sin(2 * pi * x / wavelength)
+        'bev_bend_amp': 2.0,    # 最大弯曲幅度(米), 实际随机 [0.5, 2.0], 0=关闭
+        'bev_bend_prob': 0.0,   # 弯曲应用概率
+        'bev_bend_wavelength': (4.0, 12.0),  # 正弦波长范围(米)
+
+        # 合成边界线数据 (触发时清空原 map_geom, 只保留合成的 cls1 边界线)
+        'syn_boundary_prob': 0.0,       # 合成数据概率, 0=关闭
+        'syn_boundary_min': 3,          # 合成线总数下限
+        'syn_boundary_max': 10,         # 合成线总数上限
+        'syn_lshape_prob': 0.5,         # L 型(90°垂直)占比 (非斜线中)
+        'syn_slanted_prob': 0.2,        # 陡峭直线边界占比 (θ∈[60°,120°]), 0=关闭
+        'syn_len_range': (8.0, 30.0),   # 合成线总长范围(米)
+        'syn_bend_amp': 4,            # 大曲率弯曲幅度(米)
+        'syn_bend_wavelength': (15.0, 30.0),  # 弯曲波长范围(米)
+        'syn_clearance': 1.5,           # 线间最小间距(米)
+
+        # 合成中心线数据 (L 型, 沿 x 增大方向; 与边界线每帧互斥)
+        'syn_center_prob': 0.0,         # 合成中心线概率(每帧), 0=关闭
+        'syn_center_min': 1,            # 中心线条数下限
+        'syn_center_max': 3,            # 中心线条数上限
+        'syn_center_len_range': (10.0, 40.0),  # 中心线总长范围(米)
+
         'batch_size': 16,
         'num_workers': 4,
     }),
@@ -141,6 +164,82 @@ cfg_argu2_dlayer6_aux['map_det_head']['num_decoder_layers'] = 6
 cfg_argu2_dlayer6_aux['map_det_head']['aux_loss'] = True
 cfg_argu2_dlayer6_aux['work_dir'] = './work_dirs/argument2_dlayer6_aux'
 
+cfg_argu2_dlayer3_aux_e90 = deepcopy(cfg_argu2_dlayer3_aux)
+cfg_argu2_dlayer3_aux_e90['num_epochs'] = 90
+cfg_argu2_dlayer3_aux_e90['work_dir'] = './work_dirs/argument2_dlayer3_aux_e90'
+
+cfg_argu2_dlayer3_aux_q64 = deepcopy(cfg_argu2_dlayer3_aux)
+cfg_argu2_dlayer3_aux_q64['map_det_head']['num_queries'] = 64
+cfg_argu2_dlayer3_aux_q64['work_dir'] = './work_dirs/argument2_dlayer3_aux_q64'
+
+cfg_argu2_dlayer3_aux_e90_q64 = deepcopy(cfg_argu2_dlayer3_aux)
+cfg_argu2_dlayer3_aux_e90_q64['num_epochs'] = 90
+cfg_argu2_dlayer3_aux_e90_q64['map_det_head']['num_queries'] = 64
+cfg_argu2_dlayer3_aux_e90_q64['work_dir'] = './work_dirs/argument2_dlayer3_aux_e90_q64'
+
+cfg_argu2_e90 = deepcopy(cfg_argument2)
+cfg_argu2_e90['num_epochs'] = 90
+cfg_argu2_e90['work_dir'] = './work_dirs/argument2_e90'
+
+cfg_argu2_e90_q64 = deepcopy(cfg_argument2)
+cfg_argu2_e90_q64['num_epochs'] = 90
+cfg_argu2_e90_q64['map_det_head']['num_queries'] = 64
+cfg_argu2_e90_q64['work_dir'] = './work_dirs/argument2_e90_q64'
+
+cfg_argu2_q64 = deepcopy(cfg_argument2)
+cfg_argu2_q64['map_det_head']['num_queries'] = 64
+cfg_argu2_q64['work_dir'] = './work_dirs/argument2_q64'
+
+
+cfg_argument3 = deepcopy(cfg_argument2)
+cfg_argument3['data']['bev_bend_amp'] = 4.0                  # 最大弯曲幅度(米), 0=关闭
+cfg_argument3['data']['bev_bend_prob'] = 0.5                 # 弯曲应用概率
+cfg_argument3['data']['bev_bend_wavelength'] = (15.0, 30.0)   # 正弦波长范围(米)
+cfg_argument3['work_dir'] = './work_dirs/argument3'
+
+cfg_argu3_dlayer3_aux = deepcopy(cfg_argument3)
+cfg_argu3_dlayer3_aux['map_det_head']['num_decoder_layers'] = 3
+cfg_argu3_dlayer3_aux['map_det_head']['aux_loss'] = True
+cfg_argu3_dlayer3_aux['work_dir'] = './work_dirs/argument3_dlayer3_aux'
+
+
+cfg_argument4 = deepcopy(cfg_argument2)
+cfg_argument4['data']['bev_rot_angle'] = 70.0
+cfg_argument4['work_dir'] = './work_dirs/argument4'
+
+cfg_argu4_dlayer3_aux = deepcopy(cfg_argument4)
+cfg_argu4_dlayer3_aux['map_det_head']['num_decoder_layers'] = 3
+cfg_argu4_dlayer3_aux['map_det_head']['aux_loss'] = True
+cfg_argu4_dlayer3_aux['work_dir'] = './work_dirs/argument4_dlayer3_aux'
+
+
+cfg_argument5 = deepcopy(cfg_argument3)
+cfg_argument5['data']['bev_bend_prob'] = 0.7
+cfg_argument5['data']['syn_boundary_prob'] = 0.3   # 开启合成边界线数据
+cfg_argument5['data']['syn_center_prob'] = 0.3     # 开启合成中心线数据 (与边界线分段互斥)
+cfg_argument5['work_dir'] = './work_dirs/argument5'
+
+cfg_argu5_dlayer3_aux = deepcopy(cfg_argument5)
+cfg_argu5_dlayer3_aux['map_det_head']['num_decoder_layers'] = 3
+cfg_argu5_dlayer3_aux['map_det_head']['aux_loss'] = True
+cfg_argu5_dlayer3_aux['work_dir'] = './work_dirs/argument5_dlayer3_aux'
+
+cfg_argu5_dlayer3_aux_e90 = deepcopy(cfg_argu5_dlayer3_aux)
+cfg_argu5_dlayer3_aux_e90['num_epochs'] = 90
+cfg_argu5_dlayer3_aux_e90['work_dir'] = './work_dirs/argument5_dlayer3_aux_e90'
+
+cfg_argu5_dlayer3_aux_q64 = deepcopy(cfg_argu5_dlayer3_aux)
+cfg_argu5_dlayer3_aux_q64['map_det_head']['num_queries'] = 64
+cfg_argu5_dlayer3_aux_q64['work_dir'] = './work_dirs/argument5_dlayer3_aux_q64'
+
+cfg_argu5_dlayer3_aux_q64_e90 = deepcopy(cfg_argu5_dlayer3_aux_q64)
+cfg_argu5_dlayer3_aux_q64_e90['num_epochs'] = 90
+cfg_argu5_dlayer3_aux_q64_e90['work_dir'] = './work_dirs/argument5_dlayer3_aux_q64_e90'
+
+cfg_argu5_dlayer3_aux_q64_e90_slanted = deepcopy(cfg_argu5_dlayer3_aux_q64_e90)
+cfg_argu5_dlayer3_aux_q64_e90_slanted['work_dir'] = './work_dirs/argument5_dlayer3_aux_q64_e90_slanted'
+
+
 # 配置变体注册表 (train.py / infer.py 通过 --config 选择)
 CONFIGS = {
     'default': cfg_default,
@@ -154,6 +253,21 @@ CONFIGS = {
     'argument2_dlayer3_aux': cfg_argu2_dlayer3_aux,
     'argument2_dlayer3_aux_w0_5': cfg_argu2_dlayer3_aux_w0_5,
     'argument2_dlayer6_aux': cfg_argu2_dlayer6_aux,
+    'argument2_dlayer3_aux_e90': cfg_argu2_dlayer3_aux_e90,
+    'argument2_e90': cfg_argu2_e90,
+    'argument2_e90_q64': cfg_argu2_e90_q64,
+    'argument2_dlayer3_aux_e90_q64': cfg_argu2_dlayer3_aux_e90_q64,
+    'argument2_dlayer3_aux_q64': cfg_argu2_dlayer3_aux_q64,
+    'argument3': cfg_argument3,
+    'argument3_dlayer3_aux': cfg_argu3_dlayer3_aux,
+    'argument4': cfg_argument4,
+    'argument4_dlayer3_aux': cfg_argu4_dlayer3_aux,
+    'argument5': cfg_argument5,
+    'argument5_dlayer3_aux': cfg_argu5_dlayer3_aux,
+    'argument5_dlayer3_aux_e90': cfg_argu5_dlayer3_aux_e90,
+    'argument5_dlayer3_aux_q64': cfg_argu5_dlayer3_aux_q64,
+    'argument5_dlayer3_aux_q64_e90': cfg_argu5_dlayer3_aux_q64_e90,
+    'argument5_dlayer3_aux_q64_e90_slanted': cfg_argu5_dlayer3_aux_q64_e90_slanted,
 }
 
 cfg = deepcopy(cfg_default)

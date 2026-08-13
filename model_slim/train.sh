@@ -7,5 +7,21 @@
 # python train.py --config argument2_res34
 # python train.py --config argument2_dlayer3_no_aux
 # python train.py --config argument2_dlayer3_aux
-python train.py --config argument2_dlayer6_aux
-python train.py --config argument2_dlayer3_aux_w0_5
+# python train.py --config argument2_dlayer6_aux
+# python train.py --config argument2_dlayer3_aux_w0_5
+# python train.py --config argument2_dlayer3_aux_e90
+# python train.py --config argument2_e90
+# python train.py --config argument2_e90_q64
+# python train.py --config argument2_q64
+# python train.py --config argument2_dlayer3_aux_e90_q64
+# python train.py --config argument2_dlayer3_aux_q64
+# python train.py --config argument3
+# python train.py --config argument3_dlayer3_aux
+# python train.py --config argument4
+# python train.py --config argument4_dlayer3_aux
+# python train.py --config argument5
+# python train.py --config argument5_dlayer3_aux
+# python train.py --config argument5_dlayer3_aux_e90  
+# python train.py --config argument5_dlayer3_aux_q64
+# python train.py --config argument5_dlayer3_aux_q64_e90
+python train.py --config argument5_dlayer3_aux_q64_e90_slanted

@@ -96,7 +96,7 @@ def main():
     model.eval()
     print(f'[加载] epoch={ckpt.get("epoch", "?")}')
 
-    ds = SlimDataset(cfg.data.val_ann_file, cfg.data, is_train=False)
+    ds = SlimDataset(cfg.data.val_ann_file, cfg.data, is_train=True)
     print(f'[推理] 共 {len(ds)} 个样本, score_thresh={SCORE_THRESH}')
 
     with torch.no_grad():

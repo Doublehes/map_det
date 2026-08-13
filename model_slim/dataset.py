@@ -94,12 +94,159 @@ class SlimDataset(Dataset):
             'token': sample['token'],
         }
 
+    def _gen_synthetic_map(self):
+        """生成合成边界线样本: 仅 cls1, 大曲率弯曲 + 90° L 型, 拒绝采样保证间距"""
+        lo = getattr(self.cfg, 'syn_boundary_min', 3)
+        hi = getattr(self.cfg, 'syn_boundary_max', 10)
+        target = random.randint(lo, min(hi, 10))
+        clearance = getattr(self.cfg, 'syn_clearance', 0.5)
+        accepted = []
+        for _ in range(target):
+            for _ in range(50):   # 每条线最多试 50 次, 放不进则少一条 (条数自适应)
+                cand = self._gen_candidate()
+                geom = LineString([[p[0], p[1]] for p in cand])
+                if all(geom.distance(a) > clearance for a in accepted):
+                    accepted.append(geom)
+                    break
+        return {1: [[[float(x), float(y)] for x, y in g.coords] for g in accepted]}
+
+    def _gen_candidate(self):
+        """三分生成边界线: 陡峭直线 / L 型 / 大曲率弯线 (均 cls1)
+
+        分布: 斜线 syn_slanted_prob, 其余按 syn_lshape_prob 分 L 型与弯线
+        """
+        slanted = getattr(self.cfg, 'syn_slanted_prob', 0.0)
+        r = random.random()
+        if r < slanted:
+            return self._gen_slanted_boundary()
+        lshape = getattr(self.cfg, 'syn_lshape_prob', 0.5)
+        if r < slanted + (1 - slanted) * lshape:
+            return self._gen_lshape_boundary()
+        return self._gen_curved_boundary()
+
+    def _gen_curved_boundary(self):
+        """大曲率弯线: 沿近水平方向铺点, 垂直方向加 A·sin(2πt/wl+φ), 基线控制在 ROI 内"""
+        x_min, y_min, _, x_max, y_max, _ = self.cfg.pc_range
+        L = random.uniform(*getattr(self.cfg, 'syn_len_range', (5.0, 30.0)))
+        A = random.uniform(1.0, getattr(self.cfg, 'syn_bend_amp', 2.5))
+        wl = random.uniform(*getattr(self.cfg, 'syn_bend_wavelength', (2.0, 6.0)))
+        phi = random.uniform(0, 2 * np.pi)
+        theta = random.choice([0.0, np.pi]) + random.uniform(-np.pi / 6, np.pi / 6)
+
+        hx = abs(np.cos(theta)) * L / 2
+        hy = abs(np.sin(theta)) * L / 2 + A
+        cx = random.uniform(x_min + hx, x_max - hx) if x_min + hx < x_max - hx else (x_min + x_max) / 2
+        cy = random.uniform(y_min + hy, y_max - hy) if y_min + hy < y_max - hy else (y_min + y_max) / 2
+
+        n = np.array([-np.sin(theta), np.cos(theta)])
+        t = np.linspace(-L / 2, L / 2, 24)
+        base = np.stack([cx + t * np.cos(theta), cy + t * np.sin(theta)], -1)
+        disp = A * np.sin(2 * np.pi * t / wl + phi)
+        pts = base + n[None, :] * disp[:, None]
+        return [[float(x), float(y)] for x, y in pts]
+
+    def _gen_lshape_boundary(self):
+        """90° 垂直 L 型线: 沿 x 走 L1, 转 90° 沿 y 走 L2, 臂长钳制以适配 ROI"""
+        x_min, y_min, _, x_max, y_max, _ = self.cfg.pc_range
+        total = random.uniform(*getattr(self.cfg, 'syn_len_range', (5.0, 30.0)))
+        L1 = total * random.uniform(0.3, 0.7)
+        L2 = total - L1
+        # 钳制臂长, 保证两臂在 ROI 内 (留 1m 边)
+        L1 = min(L1, (x_max - x_min) / 2 - 2.0)
+        L2 = min(L2, (y_max - y_min) / 2 - 2.0)
+        sx = random.choice([1, -1])
+        sy = random.choice([1, -1])
+        cx = random.uniform(x_min + L1 + 1, x_max - L1 - 1)
+        cy = random.uniform(y_min + L2 + 1, y_max - L2 - 1)
+
+        pts = []
+        for t in np.linspace(0, 1, 13)[:-1]:
+            pts.append([cx - sx * L1 + sx * L1 * t, cy])
+        for t in np.linspace(0, 1, 13):
+            pts.append([cx, cy + sy * L2 * t])
+        return pts
+
+    def _gen_slanted_boundary(self):
+        """陡峭直线边界: y = kx + b, 方向与 x 轴夹角 θ ∈ [60°,120°] (|k| ≥ tan60°≈1.73)"""
+        x_min, y_min, _, x_max, y_max, _ = self.cfg.pc_range
+        theta = np.radians(random.uniform(60.0, 120.0))
+        L = random.uniform(*getattr(self.cfg, 'syn_len_range', (5.0, 30.0)))
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        # 按 ROI 可用空间钳制长度 (每侧留 1m 边)
+        max_l = min(
+            (x_max - x_min - 2.0) / (2 * abs(cos_t)) if abs(cos_t) > 1e-6 else 1e9,
+            (y_max - y_min - 2.0) / (2 * abs(sin_t)),
+        )
+        L = min(L, max_l)
+        x_half = (L / 2) * abs(cos_t)
+        y_half = (L / 2) * abs(sin_t)
+        # 中点放在可行区间内, 保证整段在 ROI 中
+        mx = random.uniform(x_min + x_half, x_max - x_half)
+        my = random.uniform(y_min + y_half, y_max - y_half)
+        d = np.array([cos_t, sin_t])
+        p0 = np.array([mx, my]) - (L / 2) * d
+        p1 = np.array([mx, my]) + (L / 2) * d
+        return [[float(p0[0] + (p1[0] - p0[0]) * t),
+                 float(p0[1] + (p1[1] - p0[1]) * t)]
+                for t in np.linspace(0, 1, 16)]
+
+    def _gen_synthetic_center_map(self):
+        """生成合成中心线样本: 仅 cls0, L 型且沿 x 增大方向, 拒绝采样保证间距"""
+        lo = getattr(self.cfg, 'syn_center_min', 1)
+        hi = getattr(self.cfg, 'syn_center_max', 3)
+        target = random.randint(lo, hi)
+        clearance = getattr(self.cfg, 'syn_clearance', 0.5)
+        accepted = []
+        for _ in range(target):
+            for _ in range(50):
+                cand = self._gen_lshape_center()
+                geom = LineString([[p[0], p[1]] for p in cand])
+                if all(geom.distance(a) > clearance for a in accepted):
+                    accepted.append(geom)
+                    break
+        return {0: [[[float(x), float(y)] for x, y in g.coords] for g in accepted]}
+
+    def _gen_lshape_center(self):
+        """L 型中心线: 起点低 x → 沿 +X 到转角 → 转 ±90° 沿 Y; 点序 x 单调增 (方向沿 +X)"""
+        x_min, y_min, _, x_max, y_max, _ = self.cfg.pc_range
+        total = random.uniform(*getattr(self.cfg, 'syn_center_len_range', (10.0, 40.0)))
+        L1 = total * random.uniform(0.3, 0.7)
+        L2 = total - L1
+        # 钳制臂长适配 ROI (留 1m 边)
+        L1 = min(L1, (x_max - x_min) / 2 - 2.0)
+        L2 = min(L2, (y_max - y_min) / 2 - 2.0)
+        sy = random.choice([1, -1])
+        # 起点 x0 低, 沿 +X 到转角 cx = x0 + L1; 起点 y 约束在 ±3m 内
+        x0 = random.uniform(x_min + 1, x_max - L1 - 1)
+        y0 = random.uniform(-3.0, 3.0)
+        cx = x0 + L1
+        cy = y0
+        pts = []
+        for t in np.linspace(0, 1, 13)[:-1]:
+            pts.append([x0 + L1 * t, cy])
+        for t in np.linspace(0, 1, 13):
+            pts.append([cx, cy + sy * L2 * t])
+        return pts
+
     def _augment_map_geom(self, sample):
         """对 3D 线做翻转/旋转/平移增强 (世界坐标, 训练时), 栅格与 GT 同源生成
 
         逻辑与主数据集 MapTRDataset.__getitem__ 一致; 返回增强后的 sample (可能为新副本)
         """
         need_copy = False
+
+        # 合成数据: 每帧二选一 (中心线 / 边界线), 触发则清空原 map_geom
+        sc = getattr(self.cfg, 'syn_center_prob', 0.0)
+        sb = getattr(self.cfg, 'syn_boundary_prob', 0.0)
+        r = random.random()
+        if r < sc:
+            sample = copy.deepcopy(sample)
+            sample['map_geom'] = self._gen_synthetic_center_map()   # 只合成中心线
+            need_copy = True
+        elif r < sc + sb:
+            sample = copy.deepcopy(sample)
+            sample['map_geom'] = self._gen_synthetic_map()          # 只合成边界线
+            need_copy = True
 
         if random.random() < getattr(self.cfg, 'bev_flip_prob', 0.0):
             sample = copy.deepcopy(sample)
@@ -135,6 +282,24 @@ class SlimDataset(Dataset):
                     for pt in line:
                         pt[0] *= s
                         pt[1] *= s
+
+        bend = getattr(self.cfg, 'bev_bend_amp', 0.0)
+        if bend and random.random() < getattr(self.cfg, 'bev_bend_prob', 0.5):
+            if not need_copy:
+                sample = copy.deepcopy(sample)
+                need_copy = True
+            # A: 支持标量(最大)或 tuple(min,max)
+            if isinstance(bend, (list, tuple)):
+                A = random.uniform(bend[0], bend[1])
+            else:
+                A = random.uniform(0.5, bend)
+            wl = random.uniform(*getattr(self.cfg, 'bev_bend_wavelength', (4.0, 12.0)))
+            phase = random.uniform(0, 2 * np.pi)
+            # 全局一致弯曲: (x,y) → (x, y + A·sin(2πx/wl+φ)), 剪切映射不交叉/不自交
+            for cls_id in sample['map_geom']:                 # 全部类
+                for line in sample['map_geom'][cls_id]:
+                    for pt in line:                           # 每个点同一变换
+                        pt[1] = pt[1] + A * np.sin(2 * np.pi * pt[0] / wl + phase)
 
         trans_x = getattr(self.cfg, 'bev_trans_x', 0.0)
         trans_y = getattr(self.cfg, 'bev_trans_y', 0.0)
