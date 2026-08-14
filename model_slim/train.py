@@ -49,7 +49,8 @@ def main():
     os.makedirs(cfg.work_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join(cfg.work_dir, 'logs'))
     print(f'[设备] {cfg.device}')
-    print(f'[数据] train={cfg.data.train_ann_file}')
+    print(f'[数据] train={cfg.data.train_ann_file}, val={cfg.data.val_ann_file}, batch_size={cfg.data.batch_size}')
+    print(f'[工作目录] {cfg.work_dir}')
 
     train_dataset = SlimDataset(cfg.data.train_ann_file, cfg.data, is_train=True)
     train_loader = DataLoader(
@@ -101,8 +102,8 @@ def main():
         t0 = time.time()
         for batch_idx, batch in enumerate(train_loader):
             raster = batch['raster'].to(cfg.device)
-            cls_scores, reg_preds, _ = model(raster, return_all_layers=True)
-            loss_dict = model.compute_loss(cls_scores, reg_preds, batch)
+            cls_scores, reg_preds, seg_pred, _ = model(raster, return_all_layers=True)
+            loss_dict = model.compute_loss(cls_scores, reg_preds, seg_pred, batch)
             loss = sum(loss_dict.values())
 
             optimizer.zero_grad()
@@ -117,9 +118,13 @@ def main():
 
             cls_l = loss_dict.get('cls_loss', torch.tensor(0.0)).item()
             reg_l = loss_dict.get('reg_loss', torch.tensor(0.0)).item()
+            seg_l = loss_dict.get('seg_loss', torch.tensor(0.0)).item()
+            dice_l = loss_dict.get('dice_loss', torch.tensor(0.0)).item()
             writer.add_scalar('loss/total', loss.item(), global_step)
             writer.add_scalar('loss/cls', cls_l, global_step)
             writer.add_scalar('loss/reg', reg_l, global_step)
+            writer.add_scalar('loss/seg', seg_l, global_step)
+            writer.add_scalar('loss/dice', dice_l, global_step)
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], global_step)
 
             if batch_idx % cfg.log_interval == 0:
@@ -130,7 +135,8 @@ def main():
                     for l, (c, r) in enumerate(zip(cls_list, reg_list))
                     if c is not None)
                 print(f'[E {epoch+1}/{cfg.num_epochs}] [{batch_idx}/{len(train_loader)}] '
-                      f'loss={loss.item():.4f} cls={cls_l:.4f} reg={reg_l:.4f} | {layer_str}')
+                      f'loss={loss.item():.4f} cls={cls_l:.4f} reg={reg_l:.4f} '
+                      f'seg={seg_l:.4f} dice={dice_l:.4f} | {layer_str}')
 
         avg_loss = total_loss / len(train_loader)
         print(f'[Epoch {epoch+1}] 平均 loss={avg_loss:.4f} 耗时={time.time()-t0:.0f}s')

@@ -10,7 +10,7 @@ import torch
 from shapely.geometry import LineString
 from torch.utils.data import Dataset
 
-from data.pipeline import vectorize_map
+from data.pipeline import vectorize_map, rasterize_map
 
 
 def rasterize_rgb(vectors, canvas_size, roi_size, thickness=2):
@@ -88,11 +88,24 @@ class SlimDataset(Dataset):
         if add_noise:
             raster = add_gaussian_noise(raster, noise_cfg.sigma)
 
+        sem_mask = self._load_semantic_mask(vectors)
         return {
             'raster': torch.from_numpy(raster).permute(2, 0, 1).float(),  # (3, H, W)
             'vectors': vectors,
+            'semantic_mask': sem_mask,   # (num_classes, seg_h, seg_w)
             'token': sample['token'],
         }
+
+    def _load_semantic_mask(self, vectors):
+        """将向量线栅格化为 per-class 分割掩码 (不 flip, 与 slim 的 y 约定一致)"""
+        sem_mask = rasterize_map(
+            vectors,
+            canvas_size=getattr(self.cfg, 'seg_canvas_size', self.cfg.canvas_size),
+            roi_size=self.cfg.roi_size,
+            thickness=2,
+            num_classes=self.cfg.num_classes,
+        )
+        return torch.from_numpy(sem_mask).float()
 
     def _gen_synthetic_map(self):
         """生成合成边界线样本: 仅 cls1, 大曲率弯曲 + 90° L 型, 拒绝采样保证间距"""
@@ -360,8 +373,11 @@ def collate_fn(batch):
         cls_vecs = {int(cid): torch.from_numpy(arr) for cid, arr in b['vectors'].items()}
         vec_list.append(cls_vecs)
 
+    sem_masks = torch.stack([b['semantic_mask'] for b in batch])   # (B, num_classes, seg_h, seg_w)
+
     return {
         'raster': rasters,
         'vectors': vec_list,
+        'semantic_mask': sem_masks,
         'token': [b['token'] for b in batch],
     }

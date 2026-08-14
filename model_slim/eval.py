@@ -34,7 +34,7 @@ def run_eval(model, val_loader, cfg, score_thr=0.3, device=None, n_workers=4):
         raster = batch['raster'].to(device)
         tokens = batch['token']
 
-        cls_scores, reg_preds, _ = model(raster)
+        cls_scores, reg_preds, _, _ = model(raster)
 
         B = cls_scores.shape[0]
         for bi in range(B):

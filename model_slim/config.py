@@ -16,6 +16,7 @@ cfg_default = AttrDict({
         'cat2id': {'guide_line': 0, 'boundary': 1},
         'roi_size': (40, 20),
         'canvas_size': (160, 320),  # 栅格 (H, W), 8×8 px/m
+        'seg_canvas_size': (80, 160),  # 分割 GT 分辨率 (低分辨率算 loss)
         'thickness': 4,
         'noise': AttrDict({
             'enabled': True,
@@ -40,7 +41,7 @@ cfg_default = AttrDict({
         'syn_boundary_min': 3,          # 合成线总数下限
         'syn_boundary_max': 10,         # 合成线总数上限
         'syn_lshape_prob': 0.5,         # L 型(90°垂直)占比 (非斜线中)
-        'syn_slanted_prob': 0.2,        # 陡峭直线边界占比 (θ∈[60°,120°]), 0=关闭
+        'syn_slanted_prob': 0.0,        # 陡峭直线边界占比 (θ∈[60°,120°]), 0=关闭
         'syn_len_range': (8.0, 30.0),   # 合成线总长范围(米)
         'syn_bend_amp': 4,            # 大曲率弯曲幅度(米)
         'syn_bend_wavelength': (15.0, 30.0),  # 弯曲波长范围(米)
@@ -93,6 +94,16 @@ cfg_default = AttrDict({
         'l1_beta': 0.01,
         'aux_loss': False,   # 多层解码时是否每层监督, 需显式开启
         'aux_weight': 1.0,   # 中间层损失权重, 最后一层恒为 1.0
+    }),
+
+    'map_seg_head': AttrDict({
+        'enabled': False,
+        'bev_embed_dims': 256,
+        'num_classes': 2,
+        'focal_gamma': 2.0,
+        'focal_alpha': 0.25,
+        'loss_seg_weight': 100.0,
+        'loss_dice_weight': 1.0,
     }),
 
     'num_epochs': 48,
@@ -222,7 +233,7 @@ cfg_argument5['work_dir'] = './work_dirs/argument5'
 cfg_argu5_dlayer3_aux = deepcopy(cfg_argument5)
 cfg_argu5_dlayer3_aux['map_det_head']['num_decoder_layers'] = 3
 cfg_argu5_dlayer3_aux['map_det_head']['aux_loss'] = True
-cfg_argu5_dlayer3_aux['work_dir'] = './work_dirs/argument5_dlayer3_aux'
+cfg_argu5_dlayer3_aux['work_dir'] = './work_dirs/argument5_dlayer3_aux2'
 
 cfg_argu5_dlayer3_aux_e90 = deepcopy(cfg_argu5_dlayer3_aux)
 cfg_argu5_dlayer3_aux_e90['num_epochs'] = 90
@@ -234,10 +245,24 @@ cfg_argu5_dlayer3_aux_q64['work_dir'] = './work_dirs/argument5_dlayer3_aux_q64'
 
 cfg_argu5_dlayer3_aux_q64_e90 = deepcopy(cfg_argu5_dlayer3_aux_q64)
 cfg_argu5_dlayer3_aux_q64_e90['num_epochs'] = 90
-cfg_argu5_dlayer3_aux_q64_e90['work_dir'] = './work_dirs/argument5_dlayer3_aux_q64_e90'
+cfg_argu5_dlayer3_aux_q64_e90['work_dir'] = './work_dirs/argument5_dlayer3_aux_q64_e90_2'
 
 cfg_argu5_dlayer3_aux_q64_e90_slanted = deepcopy(cfg_argu5_dlayer3_aux_q64_e90)
+cfg_argu5_dlayer3_aux_q64_e90_slanted['data']['syn_slanted_prob'] = 0.2
 cfg_argu5_dlayer3_aux_q64_e90_slanted['work_dir'] = './work_dirs/argument5_dlayer3_aux_q64_e90_slanted'
+
+cfg_argu5_dlayer6_aux_q64_e90 = deepcopy(cfg_argu5_dlayer3_aux_q64_e90)
+cfg_argu5_dlayer6_aux_q64_e90['map_det_head']['num_decoder_layers'] = 6
+cfg_argu5_dlayer6_aux_q64_e90['work_dir'] = './work_dirs/argument5_dlayer6_aux_q64_e90'
+
+cfg_argu5_dlayer3_aux_seg = deepcopy(cfg_argu5_dlayer3_aux)
+cfg_argu5_dlayer3_aux_seg['map_seg_head']['enabled'] = True
+cfg_argu5_dlayer3_aux_seg['work_dir'] = './work_dirs/argument5_dlayer3_aux_seg'
+
+cfg_argu5_dlayer3_aux_dim512 = deepcopy(cfg_argu5_dlayer3_aux)
+cfg_argu5_dlayer3_aux_dim512['map_det_head']['embed_dims'] = 512
+cfg_argu5_dlayer3_aux_dim512['work_dir'] = './work_dirs/argument5_dlayer3_aux_dim512'
+
 
 
 # 配置变体注册表 (train.py / infer.py 通过 --config 选择)
@@ -268,6 +293,9 @@ CONFIGS = {
     'argument5_dlayer3_aux_q64': cfg_argu5_dlayer3_aux_q64,
     'argument5_dlayer3_aux_q64_e90': cfg_argu5_dlayer3_aux_q64_e90,
     'argument5_dlayer3_aux_q64_e90_slanted': cfg_argu5_dlayer3_aux_q64_e90_slanted,
+    'argument5_dlayer6_aux_q64_e90': cfg_argu5_dlayer6_aux_q64_e90,
+    'argument5_dlayer3_aux_seg': cfg_argu5_dlayer3_aux_seg,
+    'argument5_dlayer3_aux_dim512': cfg_argu5_dlayer3_aux_dim512,
 }
 
 cfg = deepcopy(cfg_default)

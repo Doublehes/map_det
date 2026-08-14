@@ -8,7 +8,7 @@ import torchvision
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from models.head import MapTRHead
+from models.head import MapTRHead, MapSegHead
 
 from configs.default import AttrDict
 
@@ -95,20 +95,26 @@ class SlimModel(nn.Module):
             neck_cfg['in_channels'] = self.backbone.out_channels
         self.neck = build_neck(AttrDict(neck_cfg))
         self.head = MapTRHead(cfg.map_det_head)
+        self.seg_head = MapSegHead(cfg.map_seg_head) if cfg.map_seg_head.get('enabled', True) else None
 
     def forward(self, raster, return_all_layers=False):
         """
         raster: (B, 3, H, W) 归一化 RGB 栅格图
         Returns:
-            cls_scores: (B, num_queries, num_classes)
-            reg_preds: (B, num_queries, num_points, 2)
+            cls_scores: (B, num_queries, num_classes) 或 list(每层)
+            reg_preds: (B, num_queries, num_points, 2) 或 list(每层)
+            seg_pred: (B, num_classes, seg_h, seg_w) 或 None
             bev_feat: (B, bev_embed_dims, bev_h, bev_w)
         """
         feats = self.backbone(raster)
         bev_feat = self.neck(feats)
         cls_scores, reg_preds = self.head(bev_feat, return_all_layers=return_all_layers)
-        return cls_scores, reg_preds, bev_feat
+        seg_pred = self.seg_head(bev_feat) if self.seg_head else None
+        return cls_scores, reg_preds, seg_pred, bev_feat
 
-    def compute_loss(self, cls_scores, reg_preds, batch):
-        """Hungarian 匹配 + 分类/回归损失, 复用 MapTRHead.loss"""
-        return self.head.loss(cls_scores, reg_preds, batch['vectors'])
+    def compute_loss(self, cls_scores, reg_preds, seg_pred, batch):
+        """Hungarian 匹配 + 分类/回归损失 + 分割损失"""
+        loss_dict = self.head.loss(cls_scores, reg_preds, batch['vectors'])
+        if self.seg_head is not None and seg_pred is not None and batch.get('semantic_mask') is not None:
+            loss_dict.update(self.seg_head.loss(seg_pred, batch['semantic_mask']))
+        return loss_dict

@@ -24,4 +24,7 @@
 # python train.py --config argument5_dlayer3_aux_e90  
 # python train.py --config argument5_dlayer3_aux_q64
 # python train.py --config argument5_dlayer3_aux_q64_e90
-python train.py --config argument5_dlayer3_aux_q64_e90_slanted
+# python train.py --config argument5_dlayer3_aux_q64_e90_slanted
+# python train.py --config argument5_dlayer6_aux_q64_e90
+# python train.py --config argument5_dlayer3_aux_seg
+python train.py --config argument5_dlayer3_aux_dim512

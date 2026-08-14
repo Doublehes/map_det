@@ -78,6 +78,19 @@ def draw_lines(vectors, canvas_size, roi_size, thickness=1):
     return img
 
 
+def draw_seg_mask(mask, thr=0.4, colors=None):
+    """将 per-class 分割掩码 (C,H,W) 渲染为 RGB 叠加图 (cls0 绿 / cls1 红, 黑底)"""
+    C, H, W = mask.shape
+    img = np.zeros((H, W, 3), dtype=np.float32)
+    if colors is None:
+        colors = [(0.0, 1.0, 0.0), (1.0, 0.0, 0.0)]
+    for c in range(C):
+        m = mask[c] > thr
+        for i in range(3):
+            img[..., i][m] = colors[c][i]
+    return img
+
+
 def main():
     parser = argparse.ArgumentParser(description='Slim 模型推理可视化')
     parser.add_argument('--config', default='default', choices=list(cfg_module.CONFIGS.keys()),
@@ -96,13 +109,13 @@ def main():
     model.eval()
     print(f'[加载] epoch={ckpt.get("epoch", "?")}')
 
-    ds = SlimDataset(cfg.data.val_ann_file, cfg.data, is_train=True)
+    ds = SlimDataset(cfg.data.val_ann_file, cfg.data, is_train=False)
     print(f'[推理] 共 {len(ds)} 个样本, score_thresh={SCORE_THRESH}')
 
     with torch.no_grad():
         for i, sample in enumerate(ds):
             raster = sample['raster'].unsqueeze(0).to(cfg.device)
-            cls_scores_all, reg_preds_all, _ = model(raster, return_all_layers=True)
+            cls_scores_all, reg_preds_all, seg_pred, _ = model(raster, return_all_layers=True)
             num_layers = len(cls_scores_all)
 
             inp = sample['raster'].permute(1, 2, 0).numpy()                    # ① 输入(+噪声), 只算一次
@@ -128,6 +141,23 @@ def main():
 
                 cv2.imshow(f'layer L{l}', panel)   # 每层独立窗口
                 print(f'[样本 {i}/{len(ds)}] L{l}: Pred {len(preds[0])}中心/{len(preds[1])}边界')
+
+            # 分割面板: 独立窗口, GT | Pred 并排
+            if seg_pred is not None:
+                pred_seg = seg_pred[0].sigmoid().cpu().numpy()          # (C, 80, 160)
+                gt_seg = sample['semantic_mask'].numpy()                # (C, 80, 160)
+                seg_panel = np.concatenate(
+                    [draw_seg_mask(gt_seg), draw_seg_mask(pred_seg)], axis=1) * 255
+                seg_panel = np.clip(seg_panel, 0, 255).astype(np.uint8)
+                hs, ws = seg_panel.shape[:2]
+                seg_panel = cv2.resize(seg_panel, (ws * 4, hs * 4), interpolation=cv2.INTER_NEAREST)
+                seg_col = seg_panel.shape[1] // 2
+                cv2.putText(seg_panel, f'GT seg  (sample {i})', (20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                cv2.putText(seg_panel, f'Pred seg  (sample {i})', (seg_col + 20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                cv2.imshow('layer seg', seg_panel)
+
             print(f'  GT: {len(gt_v.get(0, []))}中心/{len(gt_v.get(1, []))}边界')
             cv2.waitKey(0)   # 全部层窗口显示后, 按任意键看下一张
 
