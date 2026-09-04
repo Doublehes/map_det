@@ -96,7 +96,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         t_model = time.time()
-        cls_scores, reg_preds, seg_preds, heatmap_pred, _ = model(imgs, intrinsics, extrinsics, batch=batch)
+        cls_scores, reg_preds, seg_preds, heatmap_pred, _ = model(imgs, intrinsics, extrinsics, batch=batch, return_all_layers=True)
 
         batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
 
@@ -136,6 +136,14 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
             iters_total = cfg.num_epochs * len(loader)
             eta = (iters_total - iters_done) * iter_time
             line_loss = '' if 'cls_loss' not in loss_dict else f'cls={loss_dict.get("cls_loss",0):.4f} reg={loss_dict.get("reg_loss",0):.4f} '
+
+            cls_list = model.head.last_layer_cls_losses or []
+            reg_list = model.head.last_layer_reg_losses or []
+            layer_str = '  '.join(
+                f'L{l}: cls={c.item():.4f} reg={r.item():.4f}'
+                for l, (c, r) in enumerate(zip(cls_list, reg_list))
+                if c is not None)
+        
             log = (
                 f'[E {epoch+1}/{cfg.num_epochs}] [{batch_idx}/{len(loader)}] '
                 f'ETA={eta/60:.0f}min '
@@ -146,6 +154,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
                 f'{line_loss}'
                 f'seg={loss_dict.get("seg_loss",0):.4f}+{loss_dict.get("dice_loss",0):.4f} '
                 f'heat={loss_dict.get("heatmap_loss",0):.4f} '
+                f'{layer_str} '
             )
             print(log)
 

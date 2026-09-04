@@ -41,9 +41,10 @@ num_points = 16
 
 data = AttrDict({
     # ── 数据 ──
-    'data_root': "/home/double/Documents/wangjiang/line_data",
-    'train_ann_file': "/home/double/Documents/wangjiang/line_data/trainlabel_sampled_2082.pkl",
-    'val_ann_file': "/home/double/Documents/wangjiang/line_data/trainlabel_sampled_209.pkl",
+    'data_root': "/home/flow/Code/data_small/trainlabel_line_data_multiview",
+    'train_ann_file': "/home/flow/Code/data_small/trainlabel_line_multiview/trainlabel_sampled.pkl",
+    # 'val_ann_file':   "/home/flow/Code/data_small/trainlabel_line_multiview/trainlabel_sampled_100.pkl",
+    'val_ann_file': "/home/flow/Code/data_small/trainlabel_line_multiview/x30_jialing_20260612_sample_846.pkl",
     'cat2id': cat2id,
     'num_classes': num_classes,
     'num_points': num_points,
@@ -129,7 +130,8 @@ model = AttrDict({
         'focal_gamma': 2.0,
         'focal_alpha': 0.25,
         'l1_beta': 0.01,
-
+        'aux_loss': False,   # 多层解码时是否每层监督, 需显式开启
+        'aux_weight': 1.0,   # 中间层损失权重, 最后一层恒为 1.0
     }),
     'map_seg_head': AttrDict({
         'enabled': True,
