@@ -182,6 +182,41 @@ def draw_disabled_panel(panel, title):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
 
 
+def render_bev_perspective(imgs_bgr, intrinsics, extrinsics, pc_range, bev_w, bev_h):
+    """逆透视变换: BEV 网格反投影到多相机图像采样 RGB (painter's algorithm)
+
+    imgs_bgr: (num_cams, img_h, img_w, 3) uint8 BGR
+    返回: (bev_h, bev_w, 3) uint8, 后面的相机覆盖前面的
+    """
+    pc_min_x, pc_min_y, _, pc_max_x, pc_max_y, _ = pc_range
+    x_range = pc_max_x - pc_min_x
+    y_range = pc_max_y - pc_min_y
+
+    col = np.arange(bev_w, dtype=np.float32)
+    row = np.arange(bev_h, dtype=np.float32)
+    grid_c, grid_r = np.meshgrid(col, row)
+    pts_x = pc_min_x + grid_c / (bev_w - 1) * x_range
+    pts_y = pc_max_y - grid_r / (bev_h - 1) * y_range
+    pts_world = np.stack([pts_x, pts_y], axis=-1).reshape(-1, 2)  # (N, 2)
+
+    bev_img = np.zeros((bev_h, bev_w, 3), dtype=np.uint8)
+    num_cams = len(imgs_bgr)
+    for ci in range(num_cams):
+        img = imgs_bgr[ci]
+        img_h, img_w = img.shape[:2]
+        uv, valid = project_to_image(pts_world, intrinsics[ci], extrinsics[ci])
+        valid &= (uv[:, 0] >= 0) & (uv[:, 0] < img_w) & (uv[:, 1] >= 0) & (uv[:, 1] < img_h)
+        if not valid.any():
+            continue
+        u = uv[valid, 0].astype(np.int32)
+        v = uv[valid, 1].astype(np.int32)
+        r = grid_r.reshape(-1)[valid].astype(np.int32)
+        c = grid_c.reshape(-1)[valid].astype(np.int32)
+        bev_img[r, c] = img[v, u]
+
+    return bev_img
+
+
 def draw_cam_panels(canvas, imgs, intrinsics, extrinsics, gt_lines, pred_lines,
                     cam_names, start_y, cam_w, cam_h, gap):
     mean = np.array(cfg.data.img_norm['mean'], dtype=np.float32)
@@ -435,7 +470,7 @@ def infer():
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    ds = MapTRDataset(cfg.data.val_ann_file, cfg.data.data_root, cfg.data, is_train=True)
+    ds = MapTRDataset(cfg.data.val_ann_file, cfg.data.data_root, cfg.data, is_train=False)
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=collate_fn)
 
     model = MapTR(cfg.model).to(cfg.device)
@@ -524,6 +559,18 @@ def infer():
         else:
             draw_disabled_panel(canvas[:ph, pw * 2 + gap * 2:pw * 3 + gap * 2], 'Seg head disabled')
 
+        # BEV 透视变换 (独立窗口显示)
+        mean = np.array(cfg.data.img_norm['mean'], dtype=np.float32)
+        std = np.array(cfg.data.img_norm['std'], dtype=np.float32)
+        imgs_bgr = []
+        for ci in range(cfg.data.num_cams):
+            img = imgs[0, ci].cpu().numpy().transpose(1, 2, 0)
+            img = np.clip(img * std + mean, 0, 255).astype(np.uint8)
+            imgs_bgr.append(np.ascontiguousarray(img))
+        bev_warp = render_bev_perspective(
+            imgs_bgr, intrinsics[0].cpu().numpy(), extrinsics[0].cpu().numpy(),
+            cfg.data.pc_range, pw, ph)
+
         # 标题行
         title = f'idx={batch_idx}  token={sample["token"][:16]}  score>{args.score_thresh}  seg>{args.seg_thresh}  {scale_tag}'
         cv2.putText(canvas, title, (8, ph - 8),
@@ -586,8 +633,38 @@ def infer():
         act_out = save_dir / f'infer_{batch_idx:04d}_bev_act.png'
         # cv2.imwrite(str(act_out), bev_color)
         cv2.imshow('bev_act', bev_color)
-        cv2.waitKey(-1)
         print(f'[保存] {act_out}')
+
+        # BEV 透视变换视图 (独立窗口, 叠加 GT/Pred 线)
+        for cls_id, lines in gt_raw.items():
+            color = GT_COLORS.get(cls_id, (200, 200, 200))
+            for pts_list in lines:
+                pts = np.array(pts_list, dtype=np.float32)
+                if pts.shape[1] < 2:
+                    continue
+                pix = world_to_panel(pts[:, :2], pc_min_x, pc_min_y, pc_max_x, pc_max_y, pw, ph)
+                cv2.polylines(bev_warp, [pix], False, color, 2, lineType=cv2.LINE_AA)
+                cv2.circle(bev_warp, tuple(pix[0]), 3, color, -1)
+                cv2.circle(bev_warp, tuple(pix[-1]), 3, color, -1)
+        for cls_id, lines in pred_lines.items():
+            color = PRED_COLORS.get(cls_id, (200, 200, 200))
+            for pts_list in lines:
+                pts = np.array(pts_list, dtype=np.float32)
+                if pts.shape[1] < 2:
+                    continue
+                pix = world_to_panel(pts[:, :2], pc_min_x, pc_min_y, pc_max_x, pc_max_y, pw, ph)
+                cv2.polylines(bev_warp, [pix], False, color, 2, lineType=cv2.LINE_AA)
+                cv2.circle(bev_warp, tuple(pix[0]), 3, color, -1)
+                cv2.circle(bev_warp, tuple(pix[-1]), 3, color, -1)
+        cv2.putText(bev_warp, 'BEV Perspective  GT(green)  Pred(blue)', (8, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+        cv2.putText(bev_warp, f'idx={batch_idx}', (pw - 100, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
+        persp_out = save_dir / f'infer_{batch_idx:04d}_bev_perspective.png'
+        # cv2.imwrite(str(persp_out), bev_warp)
+        cv2.imshow('bev_perspective', bev_warp)
+        cv2.waitKey(-1)
+        print(f'[保存] {persp_out}')
 
         rendered += 1
 
