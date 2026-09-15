@@ -21,6 +21,71 @@ def focal_loss(pred, target, gamma=2.0, alpha=0.25, reduction='mean'):
     return loss
 
 
+def one_to_many_match(cls_scores, reg_preds, gt_cls, gt_lines, k=5,
+                      cls_weight=5.0, reg_weight=50.0):
+    """One-to-Many 匹配: 对每条 GT, 找 K 个空间最近的辅助 Query
+
+    与 HungarianMatcher 不同: 一个 Query 可以被多条 GT 匹配,
+    允许重叠的正样本分配。
+
+    Args:
+        cls_scores: (B, num_aux_queries, num_classes)
+        reg_preds:  (B, num_aux_queries, num_points, 2)
+        gt_cls:     list of LongTensor (num_gt,) per sample
+        gt_lines:   list of Tensor per sample
+        k:          每条 GT 匹配的 Query 数
+        cls_weight, reg_weight: 成本矩阵权重
+
+    Returns:
+        indices: list of dict per sample
+            dict: {gt_idx: LongTensor of matched query indices, ...}
+    """
+    bs, num_queries = cls_scores.shape[:2]
+    indices = []
+    for i in range(bs):
+        pred_cls = cls_scores[i].sigmoid()    # (num_q_aux, num_classes)
+        pred_lines = reg_preds[i]              # (num_q_aux, num_points, 2)
+
+        tgt_cls = gt_cls[i]                    # (num_gt,)
+        tgt_lines = gt_lines[i]                # (num_gt, [perm,] num_points, 2)
+
+        sample_indices = {}
+        if len(tgt_cls) == 0:
+            indices.append(sample_indices)
+            continue
+
+        # 分类成本
+        cls_cost = -torch.log(pred_cls[:, tgt_cls] + 1e-8)  # (num_q, num_gt)
+
+        # 回归成本
+        num_pts = pred_lines.shape[1]
+        pred_flat = pred_lines.flatten(1)  # (num_q_aux, num_points*2)
+
+        if tgt_lines.dim() == 4:
+            num_gt, num_permute, num_points, _ = tgt_lines.shape
+            tgt_all = tgt_lines.flatten(2).reshape(num_gt * num_permute, -1)
+            reg_full = (pred_flat.unsqueeze(1) - tgt_all.unsqueeze(0)).abs().sum(dim=-1)
+            reg_full = reg_full / num_pts
+            reg_full = reg_full.view(num_queries, num_gt, num_permute)
+            reg_cost, _ = reg_full.min(dim=-1)
+        else:
+            tgt_flat = tgt_lines.flatten(1)
+            reg_cost = (pred_flat.unsqueeze(1) - tgt_flat.unsqueeze(0)).abs().sum(dim=-1)
+            reg_cost = reg_cost / num_pts
+
+        # 总成本
+        cost = cls_weight * cls_cost + reg_weight * reg_cost  # (num_q_aux, num_gt)
+
+        # 对每条 GT, 取 cost 最小的 K 个 Query
+        for j in range(len(tgt_cls)):
+            _, topk_idx = cost[:, j].topk(k, largest=False)
+            sample_indices[j] = topk_idx
+
+        indices.append(sample_indices)
+
+    return indices
+
+
 def l1_loss(pred, target, beta=0.01):
     diff = torch.abs(pred - target)
     loss = torch.where(diff < beta, 0.5 * diff * diff / beta, diff - 0.5 * beta)

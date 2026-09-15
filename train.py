@@ -84,6 +84,7 @@ def build_optimizer(model, cfg):
 def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None, global_step=0):
     model.train()
     total_loss = total_cls_loss = total_reg_loss = total_seg_loss = total_heatmap_loss = 0.0
+    total_aux_cls_loss = total_aux_reg_loss = 0.0
 
     data_times, model_times = [], []
     epoch_start = time.time()
@@ -117,6 +118,8 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
         total_reg_loss += loss_dict.get('reg_loss', torch.tensor(0.0)).item()
         total_seg_loss += loss_dict.get('seg_loss', torch.tensor(0.0)).item() + loss_dict.get('dice_loss', torch.tensor(0.0)).item()
         total_heatmap_loss += loss_dict.get('heatmap_loss', torch.tensor(0.0)).item()
+        total_aux_cls_loss += loss_dict.get('aux_cls_loss', torch.tensor(0.0)).item()
+        total_aux_reg_loss += loss_dict.get('aux_reg_loss', torch.tensor(0.0)).item()
 
         if writer is not None:
             writer.add_scalar('loss/total', loss.item(), global_step)
@@ -125,6 +128,8 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
             writer.add_scalar('loss/seg', loss_dict.get('seg_loss', 0), global_step)
             writer.add_scalar('loss/dice', loss_dict.get('dice_loss', 0), global_step)
             writer.add_scalar('loss/heatmap', loss_dict.get('heatmap_loss', 0), global_step)
+            writer.add_scalar('loss/aux_cls', loss_dict.get('aux_cls_loss', 0), global_step)
+            writer.add_scalar('loss/aux_reg', loss_dict.get('aux_reg_loss', 0), global_step)
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], global_step)
         global_step += 1
 
@@ -154,6 +159,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
                 f'{line_loss}'
                 f'seg={loss_dict.get("seg_loss",0):.4f}+{loss_dict.get("dice_loss",0):.4f} '
                 f'heat={loss_dict.get("heatmap_loss",0):.4f} '
+                f'aux_cls={loss_dict.get("aux_cls_loss",0):.4f} aux_reg={loss_dict.get("aux_reg_loss",0):.4f} '
                 f'{layer_str} '
             )
             print(log)

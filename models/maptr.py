@@ -125,7 +125,11 @@ class MapTR(nn.Module):
 
         cls_scores, reg_preds = None, None
         if self.head is not None:
-            cls_scores, reg_preds = self.head(bev_feat, return_all_layers=return_all_layers)
+            cls_scores, reg_preds, cls_scores_aux, reg_preds_aux = self.head(bev_feat, return_all_layers=return_all_layers)
+        if cls_scores_aux is not None and any(c is not None for c in cls_scores_aux):
+            self._aux_outputs = (cls_scores_aux, reg_preds_aux)
+        else:
+            self._aux_outputs = None
 
         seg_pred = self.seg_head(bev_feat) if self.seg_head else None
         heatmap_pred = self.heatmap_head(bev_feat) if self.heatmap_head else None
@@ -135,7 +139,13 @@ class MapTR(nn.Module):
     def compute_loss(self, cls_scores, reg_preds, seg_preds, batch, heatmap_pred=None):
         loss_dict = {}
         if self.head is not None and cls_scores is not None:
-            loss_dict.update(self.head.loss(cls_scores, reg_preds, batch['vectors']))
+            aux_outputs = getattr(self, '_aux_outputs', None)
+            if aux_outputs is not None:
+                cls_scores_aux, reg_preds_aux = aux_outputs
+                loss_dict.update(self.head.loss(cls_scores, reg_preds, batch['vectors'],
+                                                cls_scores_aux, reg_preds_aux))
+            else:
+                loss_dict.update(self.head.loss(cls_scores, reg_preds, batch['vectors']))
         if self.seg_head is not None and seg_preds is not None and batch.get('semantic_mask') is not None:
             loss_dict.update(self.seg_head.loss(seg_preds, batch['semantic_mask']))
         if self.heatmap_head is not None and heatmap_pred is not None and batch.get('soft_heatmap') is not None:

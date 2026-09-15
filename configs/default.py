@@ -41,10 +41,10 @@ num_points = 16
 
 data = AttrDict({
     # ── 数据 ──
-    'data_root': "/home/flow/Code/data_small/trainlabel_line_data_multiview",
-    'train_ann_file': "/home/flow/Code/data_small/trainlabel_line_multiview/trainlabel_sampled.pkl",
+    'data_root': "/media/double/T7 Shield/LINE_DATA_SAMPLE/trainlabel_line_data_multiview",
+    'train_ann_file': "/media/double/T7 Shield/LINE_DATA_SAMPLE/trainlabel_line_multiview/label_I5_S0__own_map_infos_merge_extra_train__len27139.pkl",
     # 'val_ann_file':   "/home/flow/Code/data_small/trainlabel_line_multiview/trainlabel_sampled_100.pkl",
-    'val_ann_file': "/home/flow/Code/data_small/trainlabel_line_multiview/x30_jialing_20260612_sample_846.pkl",
+    'val_ann_file': "/media/double/T7 Shield/LINE_DATA_SAMPLE/trainlabel_line_multiview/label_I5_S0__own_map_infos_merge_extra_train__len27139.pkl",
     'cat2id': cat2id,
     'num_classes': num_classes,
     'num_points': num_points,
@@ -132,6 +132,11 @@ model = AttrDict({
         'l1_beta': 0.01,
         'aux_loss': False,   # 多层解码时是否每层监督, 需显式开启
         'aux_weight': 1.0,   # 中间层损失权重, 最后一层恒为 1.0
+
+        # One-to-Many 辅助分支配置
+        'one2many_num_aux_queries': 0,  # 辅助 Query 数量（训练专用，推理时不参与）
+        'one2many_k': 5,                  # 每条 GT 匹配的最近 Query 数
+        'one2many_loss_weight': 1.0,     # 辅助分支 loss 权重
     }),
     'map_seg_head': AttrDict({
         'enabled': True,

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 from .decoder import MapTransformerDecoder
 from .losses import (
-    HungarianMatcher, focal_loss, l1_loss,
+    HungarianMatcher, focal_loss, l1_loss, one_to_many_match,
     MaskFocalLoss, MaskDiceLoss, HeatmapLoss,
 )
 
@@ -86,6 +86,14 @@ class MapTRHead(nn.Module):
         self.query_embedding = nn.Embedding(self.num_queries, self.embed_dims)
         self.reference_points_embed = nn.Linear(self.embed_dims, self.num_points * 2)
 
+        # One-to-Many 辅助 Query
+        self.num_aux_queries = cfg.get('one2many_num_aux_queries', 0)
+        self.one2many_k = cfg.get('one2many_k', 5)
+        self.one2many_loss_weight = cfg.get('one2many_loss_weight', 1.0)
+        if self.num_aux_queries > 0:
+            self.aux_query_embedding = nn.Embedding(self.num_aux_queries, self.embed_dims)
+            self.aux_ref_points_embed = nn.Linear(self.embed_dims, self.num_points * 2)
+
         # decoder
         self.transformer = MapTransformerDecoder(cfg)
 
@@ -149,9 +157,9 @@ class MapTRHead(nn.Module):
         """
         bev_feat: (B, bev_embed_dims, H, W)
         Returns:
-            cls_scores: (B, num_queries, num_classes)
-            reg_preds: (B, num_queries, num_points, 2)
-            若 return_all_layers=True: cls_scores/reg_preds 为 list, 每层一个
+            训练: (cls_scores_main, reg_preds_main, cls_scores_aux, reg_preds_aux)
+                其中 cls_scores_aux/reg_preds_aux 为 None (推理时) 或 list of (main, aux) tuples
+            推理: (cls_scores, reg_preds, None, None)
         """
         # 1. Position encoding
         bev_embed = self._prepare_context(bev_feat)  # (B, embed_dims, H, W)
@@ -166,9 +174,20 @@ class MapTRHead(nn.Module):
                                         spatial_shapes.prod(1).cumsum(0)[:-1]])
 
         # 3. Query + reference points
-        query = self.query_embedding.weight.unsqueeze(1).repeat(1, bs, 1)  # (num_q, B, embed_dims)
-        ref_points = self.reference_points_embed(query.permute(1, 0, 2)).sigmoid()  # (B, num_q, num_pts*2)
-        ref_points = ref_points.view(bs, self.num_queries, self.num_points, 2)
+        query_main = self.query_embedding.weight.unsqueeze(1).repeat(1, bs, 1)  # (num_q, B, embed_dims)
+        ref_points_main = self.reference_points_embed(query_main.permute(1, 0, 2)).sigmoid()
+        ref_points_main = ref_points_main.view(bs, self.num_queries, self.num_points, 2)
+
+        if self.training and self.num_aux_queries > 0:
+            query_aux = self.aux_query_embedding.weight.unsqueeze(1).repeat(1, bs, 1)
+            ref_points_aux = self.aux_ref_points_embed(query_aux.permute(1, 0, 2)).sigmoid()
+            ref_points_aux = ref_points_aux.view(bs, self.num_aux_queries, self.num_points, 2)
+
+            query = torch.cat([query_main, query_aux], dim=0)
+            ref_points = torch.cat([ref_points_main, ref_points_aux], dim=1)
+        else:
+            query = query_main
+            ref_points = ref_points_main
 
         # 4. Decoder
         inter_queries, inter_refs = self.transformer(
@@ -179,16 +198,45 @@ class MapTRHead(nn.Module):
             reg_branches=self.reg_branches,
         )
 
+        num_q_main = self.num_queries
+        num_q_aux = self.num_aux_queries if (self.training and self.num_aux_queries > 0) else 0
+
         # 5. Classification + regression
         if return_all_layers:
-            cls_scores_all = [self.cls_branches[l](inter_queries[l]) for l in range(len(inter_queries))]
-            reg_preds_all = inter_refs
-            return cls_scores_all, reg_preds_all
+            cls_scores_main_list = []
+            reg_preds_main_list = []
+            cls_scores_aux_list = []
+            reg_preds_aux_list = []
+            for l in range(len(inter_queries)):
+                cls_all = self.cls_branches[l](inter_queries[l])
+                reg_all = inter_refs[l]
+                if num_q_aux > 0:
+                    cls_scores_main_list.append(cls_all[:, :num_q_main])
+                    cls_scores_aux_list.append(cls_all[:, num_q_main:])
+                    reg_preds_main_list.append(reg_all[:, :num_q_main])
+                    reg_preds_aux_list.append(reg_all[:, num_q_aux:])
+                else:
+                    cls_scores_main_list.append(cls_all[:, :num_q_main])
+                    cls_scores_aux_list.append(None)
+                    reg_preds_main_list.append(reg_all[:, :num_q_main])
+                    reg_preds_aux_list.append(None)
+            return cls_scores_main_list, reg_preds_main_list, cls_scores_aux_list, reg_preds_aux_list
 
-        cls_scores = self.cls_branches[-1](inter_queries[-1])   # (B, num_q, num_classes)
-        reg_preds = inter_refs[-1]                                # (B, num_q, num_pts, 2)
+        cls_scores = self.cls_branches[-1](inter_queries[-1])
+        reg_preds = inter_refs[-1]
 
-        return cls_scores, reg_preds
+        if num_q_aux > 0:
+            cls_scores_main = cls_scores[:, :num_q_main]
+            cls_scores_aux = cls_scores[:, num_q_main:]
+            reg_preds_main = reg_preds[:, :num_q_main]
+            reg_preds_aux = reg_preds[:, num_q_main:]
+        else:
+            cls_scores_main = cls_scores
+            cls_scores_aux = None
+            reg_preds_main = reg_preds
+            reg_preds_aux = None
+
+        return cls_scores_main, reg_preds_main, cls_scores_aux, reg_preds_aux
 
     def _layer_loss(self, cls_scores, reg_preds, gt_labels_list, gt_lines_list, indices, bs):
         """单层 cls/reg 损失 (sum), 各层共享同一匈牙利匹配 indices"""
@@ -218,13 +266,64 @@ class MapTRHead(nn.Module):
                 cls_scores[i], cls_target, self.focal_gamma, self.focal_alpha, reduction='sum')
         return total_cls, total_reg
 
-    def loss(self, cls_scores, reg_preds, gt_vectors):
+    def _layer_loss_aux(self, cls_scores, reg_preds, gt_labels_list, gt_lines_list,
+                        indices_aux, bs):
+        """One-to-Many 辅助分支损失: 每条 GT 匹配 K 个 Query, 允许重叠
+
+        Args:
+            cls_scores: (B, num_aux_queries, num_classes) 单层输出
+            reg_preds:  (B, num_aux_queries, num_points, 2) 单层输出
+            indices_aux: list of dict, dict {gt_idx: query_indices} per sample
+        """
+        total_cls = 0.0
+        total_reg = 0.0
+        total_pairs = 0
+
+        for i in range(bs):
+            num_q, num_cls = cls_scores[i].shape[0], cls_scores[i].shape[1]
+            cls_target = cls_scores[i].new_zeros(num_q, num_cls)
+
+            sample_indices = indices_aux[i]
+            if len(sample_indices) == 0:
+                continue
+
+            reg_losses = []
+            for gt_idx, q_indices in sample_indices.items():
+                gt_idx = int(gt_idx)
+                tgt_cls = gt_labels_list[i][gt_idx].item()
+                tgt_line = gt_lines_list[i][gt_idx]  # (num_pts, 2) or (2, num_pts, 2)
+
+                # Multi-label cls target
+                for q_idx in q_indices:
+                    cls_target[q_idx, tgt_cls] = 1.0
+
+                # Regression loss: 每个匹配 query 对该 GT 计算 l1
+                matched_reg = reg_preds[i, torch.tensor(list(q_indices), device=cls_scores.device)]
+                if tgt_line.shape[0] == 2:
+                    loss_dir0 = l1_loss(matched_reg, tgt_line[0].expand(len(q_indices), -1, -1), self.l1_beta)
+                    loss_dir1 = l1_loss(matched_reg, tgt_line[1].expand(len(q_indices), -1, -1), self.l1_beta)
+                    reg_losses.append(torch.min(loss_dir0, loss_dir1))
+                else:
+                    reg_losses.append(l1_loss(matched_reg, tgt_line.expand(len(q_indices), -1, -1), self.l1_beta))
+                total_pairs += len(q_indices)
+
+            # cls loss (focal)
+            total_cls += focal_loss(cls_scores[i], cls_target, self.focal_gamma, self.focal_alpha, reduction='sum')
+
+            # reg loss (累加所有匹配)
+            if reg_losses:
+                total_reg += torch.stack(reg_losses).sum()
+
+        return total_cls, total_reg, total_pairs
+
+    def loss(self, cls_scores, reg_preds, gt_vectors, cls_scores_aux=None, reg_preds_aux=None):
         """Hungarian 匹配后计算分类 FocalLoss + 回归 SmoothL1Loss
 
         支持多层(aux): cls_scores/reg_preds 可为 list(每层一组); 匹配用最后一层, 各层共享 indices.
         gt_vectors: list of dict {cls_id: (N, 1|2, num_points, 2)}, 长度 = batch_size
+        cls_scores_aux/reg_preds_aux: 辅助 Query 输出, 用于 One-to-Many 训练
         Returns:
-            {'cls_loss': Tensor, 'reg_loss': Tensor}
+            {'cls_loss': Tensor, 'reg_loss': Tensor, 'aux_cls_loss': Tensor, 'aux_reg_loss': Tensor}
         """
         is_aux = isinstance(cls_scores, (list, tuple))
         cls_all = list(cls_scores) if is_aux else [cls_scores]
@@ -255,17 +354,33 @@ class MapTRHead(nn.Module):
             gt_labels_list.append(torch.tensor(labels, device=device, dtype=torch.long))
             gt_lines_list.append(torch.stack(lines, dim=0))
 
-        # 2. Hungarian匹配: 用最后一层
+        # 2. Hungarian匹配: 用最后一层 (主分支, 一对一)
         indices = self.matcher(cls_all[-1], reg_all[-1], gt_labels_list, gt_lines_list)
 
-        # 3. 各层权重: 默认只监督最后一层; aux_loss=True 时中间层加权
+        # 3. One-to-Many 匹配: 辅助分支 (训练时)
+        indices_aux = None
+        if cls_scores_aux is not None and reg_preds_aux is not None:
+            if is_aux:
+                cls_aux_last = cls_scores_aux[-1][1] if isinstance(cls_scores_aux[-1], tuple) else cls_scores_aux[-1]
+                reg_aux_last = reg_preds_aux[-1][1] if isinstance(reg_preds_aux[-1], tuple) else reg_preds_aux[-1]
+            else:
+                cls_aux_last = cls_scores_aux
+                reg_aux_last = reg_preds_aux
+            indices_aux = one_to_many_match(
+                cls_aux_last, reg_aux_last, gt_labels_list, gt_lines_list,
+                k=self.one2many_k,
+                cls_weight=self.matcher.cls_weight,
+                reg_weight=self.matcher.reg_weight,
+            )
+
+        # 4. 各层权重
         weights = [0.0] * num_layers
         weights[-1] = 1.0
         if is_aux and self.aux_loss:
             for l in range(num_layers - 1):
                 weights[l] = self.aux_weight
 
-        # 4. 逐层损失, 加权求和
+        # 5. 主分支逐层损失
         num_matched = sum(len(indices[i][0]) for i in range(bs))
         sum_cls = 0.0
         sum_reg = 0.0
@@ -289,10 +404,39 @@ class MapTRHead(nn.Module):
                 layer_cls_list.append(cls_all[-1].mean().detach() * 0.0)
                 layer_reg_list.append(reg_all[-1].mean().detach() * 0.0)
 
+        # 6. 辅助分支逐层损失 (遍历所有层, 与主分支对称)
+        sum_aux_cls = 0.0
+        sum_aux_reg = 0.0
+        aux_num_matched = 0
+        if indices_aux is not None:
+            for l in range(num_layers):
+                if weights[l] == 0.0:
+                    continue
+                if is_aux:
+                    aux_cls_layer = cls_scores_aux[l]
+                    aux_reg_layer = reg_preds_aux[l]
+                else:
+                    aux_cls_layer = cls_scores_aux
+                    aux_reg_layer = reg_preds_aux
+
+                aux_sc, aux_sr, aux_pairs = self._layer_loss_aux(
+                    aux_cls_layer, aux_reg_layer, gt_labels_list, gt_lines_list,
+                    indices_aux, bs)
+                sum_aux_cls += weights[l] * aux_sc
+                sum_aux_reg += weights[l] * aux_sr
+                aux_num_matched += aux_pairs
+
+            if aux_num_matched > 0:
+                sum_aux_cls = sum_aux_cls / aux_num_matched
+                sum_aux_reg = sum_aux_reg / aux_num_matched
+            else:
+                sum_aux_cls = aux_cls_layer.mean() * 0.0
+                sum_aux_reg = aux_reg_layer.mean() * 0.0
+
         self.last_layer_cls_losses = layer_cls_list
         self.last_layer_reg_losses = layer_reg_list
 
-        # 5. 归一化
+        # 7. 归一化主分支损失
         if num_matched > 0:
             sum_cls = sum_cls / num_matched
             sum_reg = sum_reg / num_matched
@@ -300,8 +444,16 @@ class MapTRHead(nn.Module):
             sum_cls = cls_all[-1].mean() * 0.0
             sum_reg = reg_all[-1].mean() * 0.0
 
-        return {'cls_loss': self.loss_cls_weight * sum_cls,
-                'reg_loss': self.loss_reg_weight * sum_reg}
+        # 8. 合并损失
+        loss_dict = {
+            'cls_loss': self.loss_cls_weight * sum_cls,
+            'reg_loss': self.loss_reg_weight * sum_reg,
+        }
+        if aux_num_matched > 0:
+            loss_dict['aux_cls_loss'] = self.loss_cls_weight * self.one2many_loss_weight * sum_aux_cls
+            loss_dict['aux_reg_loss'] = self.loss_reg_weight * self.one2many_loss_weight * sum_aux_reg
+
+        return loss_dict
 
 
 class MapSegHead(nn.Module):
