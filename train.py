@@ -142,12 +142,15 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
             eta = (iters_total - iters_done) * iter_time
             line_loss = '' if 'cls_loss' not in loss_dict else f'cls={loss_dict.get("cls_loss",0):.4f} reg={loss_dict.get("reg_loss",0):.4f} '
 
-            cls_list = model.head.last_layer_cls_losses or []
-            reg_list = model.head.last_layer_reg_losses or []
-            layer_str = '  '.join(
-                f'L{l}: cls={c.item():.4f} reg={r.item():.4f}'
-                for l, (c, r) in enumerate(zip(cls_list, reg_list))
-                if c is not None)
+            if model.head is not None:
+                cls_list = model.head.last_layer_cls_losses or []
+                reg_list = model.head.last_layer_reg_losses or []
+                layer_str = '  '.join(
+                    f'L{l}: cls={c.item():.4f} reg={r.item():.4f}'
+                    for l, (c, r) in enumerate(zip(cls_list, reg_list))
+                    if c is not None)
+            else:
+                layer_str = ''
         
             log = (
                 f'[E {epoch+1}/{cfg.num_epochs}] [{batch_idx}/{len(loader)}] '
