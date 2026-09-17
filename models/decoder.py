@@ -53,7 +53,7 @@ class Gather(nn.Module):
     通过 concat + MLP + LayerNorm 实现 Gather 聚合。
     """
 
-    def __init__(self, embed_dims, num_points, gather_mlp_dims=None):
+    def __init__(self, embed_dims, num_points, gather_mlp_dims=None, residual='none'):
         super().__init__()
         input_dims = num_points * embed_dims
         hidden_dims = gather_mlp_dims if gather_mlp_dims is not None else embed_dims * 2
@@ -64,12 +64,19 @@ class Gather(nn.Module):
             nn.Linear(hidden_dims, embed_dims),
             nn.LayerNorm(embed_dims),
         )
+        # 残差模式: 'none'=无残差 / 'mean'=点均值残差(A) / 'identity'=实例query残差(B, 对齐原版MapQR)
+        self.residual = residual
 
-    def forward(self, x):
+    def forward(self, x, identity=None):
         # x: (B, num_queries, num_points, embed_dims)
         B, N, P, D = x.shape
-        x = x.flatten(2)  # (B, num_queries, num_points*embed_dims)
-        return self.mlp(x)  # (B, num_queries, embed_dims)
+        out = self.mlp(x.flatten(2))  # (B, num_queries, embed_dims)
+        if self.residual == 'mean':
+            out = out + x.mean(dim=2)
+        elif self.residual == 'identity':
+            assert identity is not None, 'residual=identity 需要传入 scatter 前的实例 query'
+            out = out + identity
+        return out
 
 
 class MapTransformerLayer(nn.Module):
@@ -113,7 +120,8 @@ class MapTransformerLayer(nn.Module):
             num_feats = self.embed_dims // 2
             self.point_pos_embed = PointPositionalEncoding(num_feats, self.embed_dims)
             gather_mlp_dims = getattr(cfg, 'gather_mlp_dims', self.embed_dims * 2)
-            self.gather = Gather(self.embed_dims, self.num_points, gather_mlp_dims)
+            residual = getattr(cfg, 'gather_residual', 'none')
+            self.gather = Gather(self.embed_dims, self.num_points, gather_mlp_dims, residual)
 
     def _convert_kv(self, key, value, bs):
         """将 key/value 从 (H*W, B, D) 转为 (B, H*W, D) 以适配 batch_first=True"""
@@ -170,6 +178,7 @@ class MapTransformerLayer(nn.Module):
         q = self.norm1(query_bf)
         q = self.self_attn(q, q, q, key_padding_mask=q_k_mask)[0]
         query_bf = identity + q  # (B, num_q, embed_dims)
+        sgq_identity = query_bf  # scatter 前的实例 query, 供 residual='identity' 使用
 
         # --- 2. Scatter ---
         # (B, num_q, embed_dims) → (B, num_q, num_points, embed_dims)
@@ -205,7 +214,7 @@ class MapTransformerLayer(nn.Module):
         # --- 5. Gather 聚合 ---
         # (B, num_q*num_points, embed_dims) → (B, num_q, num_points, embed_dims) → (B, num_q, embed_dims)
         query_gathered = query_cross.view(B, num_q, P, -1)  # (B, num_q, num_points, embed_dims)
-        query_gathered = self.gather(query_gathered)  # (B, num_q, embed_dims)
+        query_gathered = self.gather(query_gathered, identity=sgq_identity)  # (B, num_q, embed_dims)
 
         return query_gathered
 

@@ -41,10 +41,12 @@ num_points = 16
 
 data = AttrDict({
     # ── 数据 ──
-    'data_root': "/media/double/T7 Shield/LINE_DATA_SAMPLE/trainlabel_line_data_multiview",
-    'train_ann_file': "/media/double/T7 Shield/LINE_DATA_SAMPLE/trainlabel_line_multiview/label_I5_S0__own_map_infos_merge_extra_train__len27139.pkl",
-    # 'val_ann_file':   "/home/flow/Code/data_small/trainlabel_line_multiview/trainlabel_sampled_100.pkl",
-    'val_ann_file': "/media/double/T7 Shield/LINE_DATA_SAMPLE/trainlabel_line_multiview/label_I5_S0__own_map_infos_merge_extra_train__len27139.pkl",
+    'data_root': "/home/flow/Code/data_small/trainlabel_line_data_multiview",
+    'train_ann_file': "/home/flow/Code/data_small/trainlabel_line_multiview/sample_own_map_infos_merge_extra_train_len27139.pkl",
+    'val_ann_file': "/home/flow/Code/data_small/trainlabel_line_multiview/sample_own_map_infos_merge_extra_val_len272.pkl",
+
+    # 'data_root': "/mnt/hard_disk/data/trainlabel_line_data_multiview",
+    # 'val_ann_file':   "/mnt/hard_disk/data/trainlabel_line_multiview/origin_label_for_evaluation/x30_jialing_20260612_loop2.pkl",
     'cat2id': cat2id,
     'num_classes': num_classes,
     'num_points': num_points,
@@ -141,6 +143,7 @@ model = AttrDict({
         # SGQ 架构开关 (False=原版MapTR, True=Scatter-and-Gather Query)
         'use_sgq': False,
         'gather_mlp_dims': 512,         # Gather MLP 隐藏层维度
+        'gather_residual': 'none',      # Gather 残差模式: 'none'=无残差 / 'mean'=点均值残差 / 'identity'=实例query残差(对齐原版MapQR)
     }),
     'map_seg_head': AttrDict({
         'enabled': True,
