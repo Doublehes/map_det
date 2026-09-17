@@ -137,6 +137,10 @@ model = AttrDict({
         'one2many_num_aux_queries': 0,  # 辅助 Query 数量（训练专用，推理时不参与）
         'one2many_k': 5,                  # 每条 GT 匹配的最近 Query 数
         'one2many_loss_weight': 1.0,     # 辅助分支 loss 权重
+
+        # SGQ 架构开关 (False=原版MapTR, True=Scatter-and-Gather Query)
+        'use_sgq': False,
+        'gather_mlp_dims': 512,         # Gather MLP 隐藏层维度
     }),
     'map_seg_head': AttrDict({
         'enabled': True,
