@@ -28,6 +28,6 @@ config_default.data.batch_size = 8
 
 # ── 训练入口 ──
 config_default.work_dir = ''
-config_default.pretrained = './work_dirs/stage1_seg_pretrain/latest.pth'
+config_default.pretrained = './work_dirs/stage1_seg_pretrain_e36_arg/latest.pth'
 config_default.freeze_backbone = False
 config_default.num_epochs = 72

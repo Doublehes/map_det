@@ -27,6 +27,6 @@ config_default.data.bev_trans_y = 3.0
 
 # ── 训练入口 ──
 config_default.work_dir = ''
-config_default.pretrained = 'work_dirs/stage1_seg_pretrain/latest.pth'    # ← 用户在此填入 backbone 预训练权重路径
+config_default.pretrained = 'work_dirs/stage1_seg_pretrain_e72_arg/latest.pth'    # ← 用户在此填入 backbone 预训练权重路径
 config_default.freeze_backbone = False
 config_default.num_epochs = 72
