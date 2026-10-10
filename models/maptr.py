@@ -126,7 +126,7 @@ class MapTR(nn.Module):
         cls_scores, reg_preds = None, None
         if self.head is not None:
             cls_scores, reg_preds, cls_scores_aux, reg_preds_aux = self.head(bev_feat, return_all_layers=return_all_layers)
-        if cls_scores_aux is not None and any(c is not None for c in cls_scores_aux):
+        if self.head is not None and cls_scores_aux is not None and any(c is not None for c in cls_scores_aux):
             self._aux_outputs = (cls_scores_aux, reg_preds_aux)
         else:
             self._aux_outputs = None

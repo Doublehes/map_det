@@ -85,6 +85,8 @@ def render_heatmap_curve(soft_heatmap, vectors_raw, pc_range, save_path, idx, sc
     hm_raw = (heat_rot * 255).astype(np.uint8)
     hm_big = cv2.resize(hm_raw, (HM_W, HM_H), interpolation=cv2.INTER_LINEAR)
     hm_color = cv2.applyColorMap(hm_big, cv2.COLORMAP_JET)
+    mask_white = hm_big < 0.05
+    hm_color[mask_white] = (255, 255, 255)
     canvas[hm_top:hm_top + HM_H, hm_left:hm_left + HM_W] = hm_color
 
     for cls_id, lines in vectors_raw.items():
@@ -197,6 +199,10 @@ def visualize_sample(sample_idx, save_dir, is_train=False):
     CANVAS_W = BEV_W * 2 + GAP     # 1620
     CAM_W, CAM_H = 530, 260
     CAM_GAP = 15
+
+    if sample_idx == -1:
+        print(f'Sample_idx is -1, visualize all {len(dataset)} samples')
+        sample_idx = range(len(dataset))
 
     for idx in sample_idx:
         item = dataset[idx]
@@ -367,7 +373,7 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='MapTR数据可视化 (OpenCV)')
     parser.add_argument('config', type=str, help='配置文件路径')
-    parser.add_argument('--indices', type=int, nargs='+', default=[0, 1, 2],
+    parser.add_argument('--indices', type=int, nargs='+', default=-1,
                         help='要可视化的样本索引')
     parser.add_argument('--save-dir', type=str, default='work_dirs/vis',
                         help='保存目录')
