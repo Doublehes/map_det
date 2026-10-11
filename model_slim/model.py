@@ -108,7 +108,7 @@ class SlimModel(nn.Module):
         """
         feats = self.backbone(raster)
         bev_feat = self.neck(feats)
-        cls_scores, reg_preds = self.head(bev_feat, return_all_layers=return_all_layers)
+        cls_scores, reg_preds, _, _ = self.head(bev_feat, return_all_layers=return_all_layers)
         seg_pred = self.seg_head(bev_feat) if self.seg_head else None
         return cls_scores, reg_preds, seg_pred, bev_feat
 

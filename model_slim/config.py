@@ -263,6 +263,10 @@ cfg_argu5_dlayer3_aux_dim512 = deepcopy(cfg_argu5_dlayer3_aux)
 cfg_argu5_dlayer3_aux_dim512['map_det_head']['embed_dims'] = 512
 cfg_argu5_dlayer3_aux_dim512['work_dir'] = './work_dirs/argument5_dlayer3_aux_dim512'
 
+cfg_argu5_dlayer3_aux_sgq = deepcopy(cfg_argu5_dlayer3_aux)
+cfg_argu5_dlayer3_aux_sgq['map_det_head']['use_sgq'] = True
+cfg_argu5_dlayer3_aux_sgq['map_det_head']['gather_residual'] = 'identity'
+cfg_argu5_dlayer3_aux_sgq['work_dir'] = './work_dirs/argument5_dlayer3_aux_sgq'
 
 
 # 配置变体注册表 (train.py / infer.py 通过 --config 选择)
@@ -296,6 +300,7 @@ CONFIGS = {
     'argument5_dlayer6_aux_q64_e90': cfg_argu5_dlayer6_aux_q64_e90,
     'argument5_dlayer3_aux_seg': cfg_argu5_dlayer3_aux_seg,
     'argument5_dlayer3_aux_dim512': cfg_argu5_dlayer3_aux_dim512,
+    'argument5_dlayer3_aux_sgq': cfg_argu5_dlayer3_aux_sgq,
 }
 
 cfg = deepcopy(cfg_default)
