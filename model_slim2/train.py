@@ -49,7 +49,8 @@ def run_val(model, loader, device):
         samp_cost = sample_map(cost, points)
         samp_dist = sample_map(dist, points)
         valid = (samp_dist > 0).float().clamp_min(1e-6)
-        length = (points[:, :, -1] - points[:, :, 0]).norm(dim=-1)
+        # length = (points[:, :, -1] - points[:, :, 0]).norm(dim=-1)
+        length = (points[:, :, 1:] - points[:, :, :-1]).norm(dim=-1).sum(dim=-1)
 
         tot['cost'] += (samp_cost * valid).sum().item()
         tot['interior'] += (samp_dist * valid).sum().item()

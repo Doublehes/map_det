@@ -17,11 +17,11 @@ cfg_default = AttrDict({
         'num_classes': 4,
         'drivable_classes': (2,),      # 可通行类: 低速区 + 路面
         'ignore_index': 255,
-        'cost_values': {0: 1.0, 1: 0.5, 2: 0.05, 3: 1.0},  # [0,1] 1.0=最高代价
+        'cost_values': {0: 1.0, 1: 0.5, 2: 0.01, 3: 1.0},  # [0,1] 1.0=最高代价
         'ignore_cost': 1.0,
         'cost_sigma': 3.0,               # 代价图高斯平滑 sigma (像素)
-        'dist_max_px': 40.0,             # 距离场归一化上限 (像素)
-        'val_ratio': 0.1,
+        'dist_max_px': 10.0,             # 距离场归一化上限 (像素)
+        'val_ratio': 0.9,
         'seed': 42,
         # 几何增强 (只作用于标签图, 信号同源派生)
         'flip_prob': 0.5,
@@ -50,7 +50,7 @@ cfg_default = AttrDict({
     'map_det_head': AttrDict({
         'type': 'maptr',
         'num_classes': 1,                # 只中心线一类
-        'num_queries': 2,
+        'num_queries': 1,
         'num_points': 16,                # 每条线 16 个点
         'embed_dims': 128,
         'bev_embed_dims': 128,
@@ -67,11 +67,11 @@ cfg_default = AttrDict({
         'repel_weight': 1.0,
         'repel_margin': 0.15,
         'length_weight': 1.0,
-        'min_length': 0.4,
-        'spread_weight': 0.5,
+        'min_length': 0.8,
+        'spread_weight': 0.0,
         'spread_thr': 0.9,
-        'order_weight': 0.1,
-        'grow_weight': 0.0,   # =SPAN_MAX, 保持归一化前的有效强度
+        'order_weight': 0.0,
+        'grow_weight': 0.0,   # 增长激励权重 (0=关闭; 弧长度量易诱发锯齿, 调大需同步加大 smooth/order)
     }),
 
     'num_epochs': 100,

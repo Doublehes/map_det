@@ -147,7 +147,10 @@ def main():
 
     model = Slim2Model(cfg).to(cfg.device)
     ckpt = torch.load(ckpt_path, map_location=cfg.device)
-    model.load_state_dict(ckpt['model_state_dict'], strict=False)
+    missing, unexpected = model.load_state_dict(ckpt['model_state_dict'], strict=False)
+    print(f'[加载] 缺失 {len(missing)} 个参数, 未使用 {len(unexpected)} 个参数 {missing}')
+    print(f'[加载] 未使用 {len(unexpected)} 个参数 {unexpected}')
+
     model.eval()
     print(f'[加载] epoch={ckpt.get("epoch", "?")}')
 
@@ -190,6 +193,10 @@ def main():
             points = reg_preds[0].cpu().numpy()                     # (N, P, 2)
             cost_np = sample['cost'][0].numpy()                    # (H, W)
             dist_np = sample['dist_field'][0].numpy()              # (H, W)
+
+            # import matplotlib.pyplot as plt
+            # plt.plot(points[0, :, 0], points[0, :, 1])
+            # plt.show()
 
             # 按平均采样代价过滤
             cost_t = torch.from_numpy(cost_np)[None, None]
