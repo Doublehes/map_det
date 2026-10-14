@@ -73,6 +73,10 @@ def main():
     args = parser.parse_args()
     cfg = cfg_module.CONFIGS[args.config]
 
+    if os.path.exists(cfg.work_dir):
+        print(f'[警告] 工作目录已存在: {cfg.work_dir}')
+        import datetime
+        cfg.work_dir += f'_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}'
     os.makedirs(cfg.work_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join(cfg.work_dir, 'logs'))
     print(f'[设备] {cfg.device}')

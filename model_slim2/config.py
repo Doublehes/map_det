@@ -74,7 +74,7 @@ cfg_default = AttrDict({
         'grow_weight': 0.0,   # 增长激励权重 (0=关闭; 弧长度量易诱发锯齿, 调大需同步加大 smooth/order)
     }),
 
-    'num_epochs': 100,
+    'num_epochs': 200,
     'lr': 5e-4,
     'weight_decay': 1e-4,
     'grad_clip_max_norm': 35.0,
@@ -85,7 +85,7 @@ cfg_default = AttrDict({
     'val_interval': 5,
     'cost_filter_thr': 0.3,
     'log_interval': 20,
-    'checkpoint_interval': 10,
+    'checkpoint_interval': 50,
 })
 
 exp1 = deepcopy(cfg_default)

@@ -135,12 +135,13 @@ def render_loss_panel(bd_np, margin, thr):
 def main():
     parser = argparse.ArgumentParser(description='Slim2 推理可视化')
     parser.add_argument('--config', default='default', choices=list(cfg_module.CONFIGS.keys()))
+    parser.add_argument('--ckpt', default=None, help='checkpoint 路径')
     parser.add_argument('--save', default='', help='保存目录 (不弹窗)')
     parser.add_argument('--start', type=int, default=0)
     args = parser.parse_args()
     cfg = cfg_module.CONFIGS[args.config]
 
-    ckpt_path = os.path.join(cfg.work_dir, 'latest.pth')
+    ckpt_path = os.path.join(cfg.work_dir, 'latest.pth') if args.ckpt is None else args.ckpt
     print(f'[加载] {ckpt_path}')
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f'checkpoint 不存在: {ckpt_path}')
