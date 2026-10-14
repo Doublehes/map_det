@@ -13,7 +13,7 @@ cfg_default = AttrDict({
     'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
 
     'data': AttrDict({
-        'seg_dir': '/home/double/Documents/wangjiang/code/map_det/data_seg/rt_bev_semantic',
+        'seg_dir': '/home/flow/Code/MilitaryModel/map_det/data_seg/rt_bev_semantic',
         'num_classes': 4,
         'drivable_classes': (2,),      # 可通行类: 低速区 + 路面
         'ignore_index': 255,
@@ -21,7 +21,7 @@ cfg_default = AttrDict({
         'ignore_cost': 1.0,
         'cost_sigma': 3.0,               # 代价图高斯平滑 sigma (像素)
         'dist_max_px': 10.0,             # 距离场归一化上限 (像素)
-        'val_ratio': 0.9,
+        'val_ratio': 0.1,
         'seed': 42,
         # 几何增强 (只作用于标签图, 信号同源派生)
         'flip_prob': 0.5,
@@ -61,20 +61,28 @@ cfg_default = AttrDict({
         'y_flip': False,                 # 特征图 row0=顶部, 与点 v=0 一致
         'bev_feat_net': AttrDict({'enabled': False}),
         # 自监督损失权重 (归一化坐标单位)
-        'cost_weight': 1.0,
-        'interior_weight': 0.5,
-        'smooth_weight': 2.0,
-        'repel_weight': 1.0,
+        # 有效项: cost / interior / smooth / spacing / arc / span (均 >=0, 线内逐点/逐段用 Lp 聚合)
+        # 关闭项: repel / spread (单线场景下为 no-op)
+        'cost_weight': 0.0,
+        'interior_weight': 1.0,
+        'smooth_weight': 2.0,            # 形状正则: 转向(防打结) + 最小步长(防挤堆)
+        'smooth_min_step_px': 2.0,       # 相邻段最小步长(像素), 段更短时惩罚
+        'spacing_weight': 1.0,           # 等距正则: 段长相对偏差(尺度无关)
+        
+        'arc_weight': 1.0,            # 弧长下界 (真实长度), 逼线张开
+        'min_arc': 0.4,
+        'span_weight': 1.0,             # 端点距下界: 逼线张开成条(防紧凑团/环), 与弧长互补
+        'min_span': 0.4,
+
+        'repel_weight': 0.0,
         'repel_margin': 0.15,
-        'length_weight': 1.0,
-        'min_length': 0.4,
         'spread_weight': 0.0,
         'spread_thr': 0.9,
-        'order_weight': 0.0,
-        'grow_weight': 0.0,   # 增长激励权重 (0=关闭; 弧长度量易诱发锯齿, 调大需同步加大 smooth/order)
+
+        'lp_p': 4.0,                     # 线内 Lp 聚合指数 (>1 强调最差点/段, 1=均值)
     }),
 
-    'num_epochs': 200,
+    'num_epochs': 100,
     'lr': 5e-4,
     'weight_decay': 1e-4,
     'grad_clip_max_norm': 35.0,
@@ -83,18 +91,23 @@ cfg_default = AttrDict({
     'work_dir': './work_dirs/default',
     'pretrained': '',
     'val_interval': 5,
-    'cost_filter_thr': 0.3,
+    'cost_filter_thr': 0.99,
     'log_interval': 20,
     'checkpoint_interval': 50,
 })
 
 exp1 = deepcopy(cfg_default)
-exp1['map_det_head']['grow_weight'] = 0.1
+exp1['map_det_head']['interior_weight'] = 1.0
+exp1['num_epochs'] = 200
+exp1['map_det_head']['min_arc'] = 0.8
 exp1['work_dir'] = './work_dirs/exp1'
 
 exp2 = deepcopy(cfg_default)
-exp2['map_det_head']['min_length'] = 0.8
-exp2['work_dir'] = './work_dirs/exp1'
+exp2['map_det_head']['cost_weight'] = 1.0
+exp2['map_det_head']['interior_weight'] = 0.0
+exp2['map_det_head']['min_arc'] = 0.8
+exp2['num_epochs'] = 200
+exp2['work_dir'] = './work_dirs/exp2'
 
 CONFIGS = {
     'default': cfg_default,

@@ -1,16 +1,26 @@
-"""model_slim2 自监督损失辅助函数: 采样 + 光滑/排斥/长度/多样性/单调
+"""model_slim2 自监督损失辅助函数: 采样 + 光滑/排斥/长度/等距/展布
 
 所有点均为 (u,v) 归一化坐标 [0,1] (u→宽, v→高), 与 MapTRHead 输出约定一致。
 
 每个损失都拆成"未聚合值"与"聚合函数"两部分:
-    - per-query (B, N): cost/interior/smooth/length/order/grow  每条线一个值
+    - per-query (B, N): cost/interior/smooth/spacing/arc/span  每条线一个值
     - per-pair  (B, N, N): repel/spread                    每两条线一个值
     - *_loss(...) 聚合函数供训练使用; *_per_* 供调试/可视化逐项查看
 """
 import torch
 import torch.nn.functional as F
 
-ARC_MAX = 1.0      # 单位正方形内两点最大距离(对角线), 用于归一化弧长
+
+def lp_reduce(x: torch.Tensor, dim: int = -1, p: float = 4.0, eps: float = 1e-6) -> torch.Tensor:
+    """非负张量的 Lp 范数聚合: (mean(x^p) + eps)^(1/p)
+
+    p>1 放大该维度上的大值(如最尖折角/最贴边界的点), p=1 退化为均值。
+    根号内加 eps 避免 x 全 0 时 ^(1/p) 在 0 处梯度无穷(否则线一旦变直/变均匀就出 nan)。
+    仅用于线内逐点/逐段维度, 避免均值把"难点"平均掉。
+    """
+    if p == 1.0:
+        return x.mean(dim=dim)
+    return (x.clamp_min(0.0).pow(p).mean(dim=dim) + eps).pow(1.0 / p)
 
 
 def sample_map(map_2d: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
@@ -43,106 +53,83 @@ def _off_diag_mask(n: int, device) -> torch.Tensor:
 
 # ─────────────────────────── per-query 未聚合值 (B, N) ───────────────────────────
 
-def cost_per_query(cost: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
-    """每条线的平均采样代价 (B, N), 越低越好"""
-    """ 平均采样代价的 Lp 范数, 
-        - p=2:L2,比均值更看重高点,但不如 max 极端
-        - p=4~8:强烈放大高代价,同时保留其余点信息,是大多数 BEV / 规划工作的优选"""
+def cost_per_query(cost: torch.Tensor, points: torch.Tensor, p: float = 4.0) -> torch.Tensor:
+    """每条线的采样代价 Lp 范数 (B, N), 越低越好
 
-    p = 2.0
-    score = sample_map(cost, points) # [B,N,T]
-    return (score.pow(p).mean(dim=-1)).pow(1.0/p)
-    # return sample_map(cost, points).mean(dim=-1)
-
-
-def interior_per_query(dist_field: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
-    """每条线的居中惩罚 (B, N) = 1 - 平均距离场, 越低越好(越居中)"""
-    return 1.0 - sample_map(dist_field, points).mean(dim=-1)
-
-
-def smooth_per_query(points: torch.Tensor) -> torch.Tensor:
-    """每条线的二阶差分模长 (B, N), 越小越平滑"""
-    second = points[:, :, 2:] - 2.0 * points[:, :, 1:-1] + points[:, :, :-2]
-
+    Lp(线内点): p>1 放大高代价点, 强调"越过障碍的坏点"; p=1 退化为均值。
+    - p=2: L2, 比均值更看重高点
+    - p=4~8: 强烈放大高代价点, 同时保留其余点信息
     """
-    约束相邻轨迹段长度尽量相等（步长均匀）
-    points: [B, N, T, D]
-    return: [B, N]
+    score = sample_map(cost, points)                  # (B, N, T)
+    return lp_reduce(score, dim=-1, p=p)
+
+
+def interior_per_query(dist_field: torch.Tensor, points: torch.Tensor, p: float = 4.0) -> torch.Tensor:
+    """每条线的居中惩罚 (B, N) = Lp(1 - 距离场), 越低越好(越居中)
+
+    Lp 放大"最贴边界"的点, 促使整条线都远离边界, 而非只在平均意义上居中。
     """
-    v = points[:, :, 1:, :] - points[:, :, :-1, :]  # [B,N,T-1,D]
-    s = torch.norm(v, dim=-1)  # [B,N,T-1] 每一段的长度
-    # 相邻两段长度之差
-    delta_s = torch.abs(s[:, :, 1:] - s[:, :, :-1])
-
-    return second.norm(dim=-1).mean(dim=-1) + delta_s.mean(dim=-1)
-
-# def smooth_per_query(points: torch.Tensor, eps=1e-6) -> torch.Tensor:
-#     """
-#     纯曲率curvature平滑loss,只惩罚路径弯折,速度大小无约束
-#     points: [B,N,T,2] （仅2D轨迹,叉乘适合xy平面）
-#     return [B,N]
-#     """
-#     # 三个连续点 a, b, c
-#     a = points[:, :, :-2]
-#     b = points[:, :, 1:-1]
-#     c = points[:, :, 2:]
-#     v1 = b - a
-#     v2 = c - b
-#     # 2D叉乘模长 = v1x*v2y - v1y*v2x
-#     cross = v1[...,0] * v2[...,1] - v1[...,1] * v2[...,0]
-#     cross_abs = cross.abs()
-#     len1 = v1.norm(dim=-1)
-#     len2 = v2.norm(dim=-1)
-#     len_ac = (c - a).norm(dim=-1)
-#     kappa = 2 * cross_abs / (len1 * len2 * len_ac + eps)
-#     # import pudb; pudb.set_trace()
-#     return kappa.mean(dim=-1)
+    return lp_reduce(1.0 - sample_map(dist_field, points), dim=-1, p=p)
 
 
-def length_per_query(points: torch.Tensor, min_length: float) -> torch.Tensor:
-    """每条线端点距不足 min_length 的惩罚 (B, N)"""
+def smooth_per_query(points: torch.Tensor, img_hw=None, min_step_px: float = 2.0,
+                     p: float = 4.0, norm_eps: float = 0.1) -> torch.Tensor:
+    """形状正则 (B, N): 转向(防打结) + 最小步长(防点挤堆/稳定方向), 越低越平滑
+
+    points: (B, N, P, 2) 归一化 (u, v), u→宽, v→高
+    img_hw: (H, W); 提供时换算到各向同性像素坐标再算夹角(避免宽高比扭曲角度)
+    min_step_px: 相邻段最小步长(像素), 段更短时惩罚
+    p: 线内 Lp 聚合指数 (>1 强调最尖折角 / 最短段)
+    norm_eps: 段长平滑下界(像素), 用 sqrt(|v|^2+norm_eps^2) 代替 |v|, 使 |v|→0 时梯度有界
+    """
+    pts = points
+    if img_hw is not None:
+        h, w = img_hw
+        pts = points * points.new_tensor([w, h])       # (u,v) -> [w,h]
+
+    v = pts[:, :, 1:] - pts[:, :, :-1]                 # (B,N,P-1,2) 段向量
+    s = torch.sqrt(v.square().sum(dim=-1) + norm_eps * norm_eps)  # 平滑段长, |v|→0 梯度有界
+    u = v / s.unsqueeze(-1)                            # 软单位方向, |u|<=1
+    cos = (u[:, :, :-1] * u[:, :, 1:]).sum(dim=-1)     # (B,N,P-2) 相邻段夹角余弦
+
+    turn = lp_reduce(1.0 - cos, dim=-1, p=p)           # 转向: 折角越大越罚(掉头=2)
+    short = lp_reduce(torch.relu(min_step_px - s), dim=-1, p=p)  # 短边: 段过短越罚
+    return turn + short
+
+
+def spacing_per_query(points: torch.Tensor, img_hw=None, p: float = 4.0,
+                      norm_eps: float = 0.1, eps: float = 1e-6) -> torch.Tensor:
+    """等距惩罚 (B, N): 段长偏离均值的程度, 尺度无关, 越低越等距
+
+    对每段取 |s_i - mean(s)| / mean(s), 再做线内 Lp 聚合(强调最不均匀的一段)。
+    仅约束相对均匀; 绝对尺度由 arc 的弧长下界负责。
+    mean(s) 用 detach 的尺度做分母, 使梯度有界; s 用平滑段长防 0 处异常。
+    """
+    pts = points
+    if img_hw is not None:
+        h, w = img_hw
+        pts = points * points.new_tensor([w, h])
+    v = pts[:, :, 1:] - pts[:, :, :-1]
+    s = torch.sqrt(v.square().sum(dim=-1) + norm_eps * norm_eps)  # (B,N,P-1) 平滑段长
+    s_mean = s.mean(dim=-1, keepdim=True).clamp_min(eps).detach()
+    dev = (s - s_mean).abs() / s_mean                  # (B,N,P-1) 相对偏差
+    return lp_reduce(dev, dim=-1, p=p)
+
+
+def arc_per_query(points: torch.Tensor, min_arc: float) -> torch.Tensor:
+    """每条线弧长(总路径长度)不足 min_arc 的惩罚 (B, N)"""
+    d = (points[:, :, 1:] - points[:, :, :-1]).norm(dim=-1).sum(dim=-1)
+    return torch.relu(min_arc - d)
+
+
+def span_per_query(points: torch.Tensor, min_span: float) -> torch.Tensor:
+    """每条线首尾端点距不足 min_span 的惩罚 (B, N)
+
+    端点距 = ‖p_{P-1} - p_0‖ 是"净展布", 无法被原地振荡伪造, 与弧长(arc_per_query)互补:
+    弧长管真实长度, span 管张开(防紧凑团/环)。梯度=单位向量, 无除法, 数值安全。
+    """
     d = (points[:, :, -1] - points[:, :, 0]).norm(dim=-1)
-    return torch.relu(min_length - d)
-
-
-# def order_per_query(points: torch.Tensor) -> torch.Tensor:
-#     """每条线 u 增量为负的惩罚 (B, N)"""
-#     du = points[:, :, 1:, 0] - points[:, :, :-1, 0]
-#     return torch.relu(-du).mean(dim=-1)
-
-def order_per_query(points: torch.Tensor, eps=1e-6) -> torch.Tensor:
-    """相邻线的余弦相似度惩罚 (B, N), 越小越好(方向一致)"""
-    real_points = points.clone() # 转化到真实尺度
-    real_points[..., 0] = real_points[..., 0] * 32
-    real_points[..., 1] = real_points[..., 1] * 50
-    
-    v = real_points[:, :, 1:, :] - real_points[:, :, :-1, :]
-    v_norm = torch.norm(v, dim=-1, keepdim=True) + eps
-    v_unit = v / v_norm
-    dot = (v_unit[:, :, :-1, :] * v_unit[:, :, 1:, :]).sum(dim=-1)
-    # cosθ < 0 才惩罚
-    penalty = torch.relu(-dot)
-    
-    mask = penalty > 0.0
-    sum_pen = penalty.sum(dim=-1)
-    cnt = mask.sum(dim=-1).clamp(min=1)  # 至少1,防止全0除0
-    # import pudb; pudb.set_trace()
-    return sum_pen / cnt
-
-
-def grow_per_query(cost: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
-    """可通行区加权的弧长惩罚 (B, N) = relu(1 - 加权弧长/ARC_MAX), 越低越好(越长)
-
-    弧长 = 相邻点距离之和(求和); 每段按段中点采样代价图, 权重 = 1 - cost
-    (可通行区≈1, 非可通行区≈0)。relu 封顶: 弧长 >= ARC_MAX 后不再奖励。
-    """
-    seg = points[:, :, 1:] - points[:, :, :-1]                # (B, N, P-1, 2) 每段向量
-    seg_len = seg.norm(dim=-1)                                # (B, N, P-1) 每段长度
-    mid = (points[:, :, 1:] + points[:, :, :-1]) * 0.5        # (B, N, P-1, 2) 段中点
-    weight = (1.0 - sample_map(cost, mid)).clamp(0.0, 1.0)    # (B, N, P-1) 可通行权重
-    arc = (seg_len * weight).sum(dim=-1)                      # (B, N) 加权弧长(求和)
-    return torch.relu(1.0 - arc / ARC_MAX)
-
+    return torch.relu(min_span - d)
 
 
 # ─────────────────────────── per-pair 未聚合值 (B, N, N) ───────────────────────────
@@ -195,19 +182,25 @@ def spread_per_pair(points: torch.Tensor, thr: float) -> torch.Tensor:
 
 # ─────────────────────────── 聚合函数 (训练使用, 数值与原实现一致) ───────────────────────────
 
-def cost_loss(cost: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
-    """采样代价均值, 点落在低代价(可通行)区"""
-    return cost_per_query(cost, points).mean()
+def cost_loss(cost: torch.Tensor, points: torch.Tensor, p: float = 4.0) -> torch.Tensor:
+    """采样代价 Lp 范数均值, 点落在低代价(可通行)区"""
+    return cost_per_query(cost, points, p).mean()
 
 
-def interior_loss(dist_field: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
-    """居中惩罚: 1 - 距离场均值, 越小线越靠区域中心"""
-    return interior_per_query(dist_field, points).mean()
+def interior_loss(dist_field: torch.Tensor, points: torch.Tensor, p: float = 4.0) -> torch.Tensor:
+    """居中惩罚: Lp(1 - 距离场) 均值, 越小线越靠区域中心"""
+    return interior_per_query(dist_field, points, p).mean()
 
 
-def smooth_loss(points: torch.Tensor) -> torch.Tensor:
-    """二阶差分 (归一化), 防锯齿: 惩罚折线抖动, 让 16 个点构成的线更平滑"""
-    return smooth_per_query(points).mean()
+def smooth_loss(points: torch.Tensor, img_hw=None, min_step_px: float = 2.0,
+                p: float = 4.0) -> torch.Tensor:
+    """形状正则: 转向(防打结) + 最小步长(防挤堆), 线内 Lp 聚合"""
+    return smooth_per_query(points, img_hw, min_step_px, p).mean()
+
+
+def spacing_loss(points: torch.Tensor, img_hw=None, p: float = 4.0) -> torch.Tensor:
+    """等距正则: 段长相对偏差的线内 Lp 聚合, 尺度无关"""
+    return spacing_per_query(points, img_hw, p).mean()
 
 
 def repel_loss(points: torch.Tensor, margin: float) -> torch.Tensor:
@@ -222,9 +215,14 @@ def repel_loss(points: torch.Tensor, margin: float) -> torch.Tensor:
     return repel_per_pair(points, margin).sum() / (B * N * (N - 1))
 
 
-def length_loss(points: torch.Tensor, min_length: float) -> torch.Tensor:
-    """端点长度, 防线缩点: 每条线首尾两点距离 < min_length 时惩罚 (归一化)"""
-    return length_per_query(points, min_length).mean()
+def arc_loss(points: torch.Tensor, min_arc: float) -> torch.Tensor:
+    """弧长下界, 防线缩点: 每条线弧长 < min_arc 时惩罚 (归一化)"""
+    return arc_per_query(points, min_arc).mean()
+
+
+def span_loss(points: torch.Tensor, min_span: float) -> torch.Tensor:
+    """端点距下界, 逼线张开: 每条线首尾端点距 < min_span 时惩罚 (归一化)"""
+    return span_per_query(points, min_span).mean()
 
 
 def spread_loss(points: torch.Tensor, thr: float) -> torch.Tensor:
@@ -236,16 +234,6 @@ def spread_loss(points: torch.Tensor, thr: float) -> torch.Tensor:
     if N < 2:
         return points.new_zeros(())
     return spread_per_pair(points, thr).mean()
-
-
-def order_loss(points: torch.Tensor) -> torch.Tensor:
-    """点序单调 (弱), 防回折: 相邻点 u 增量为负时 hinge"""
-    return order_per_query(points).mean()
-
-
-def grow_loss(cost: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
-    """增长激励 (非负惩罚): relu(1 - 加权弧长/ARC_MAX), 最小化即最大化线在可通行区内的弧长"""
-    return grow_per_query(cost, points).mean()
 
 
 def loss_shares(loss_dict: dict) -> dict:

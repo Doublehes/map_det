@@ -84,7 +84,23 @@ def render(sample, points_np, cost_np, dist_np, ignore_index, kept, total):
     return np.concatenate([header, body], axis=0)
 
 
-PER_QUERY_KEYS = ['cost', 'interior', 'smooth', 'length', 'order', 'grow']
+PER_QUERY_KEYS = ['cost', 'interior', 'smooth', 'spacing', 'arc', 'span']
+
+
+def geometry_str(points_np):
+    """预测线 (N,P,2) → 几何诊断字符串: 每条线的 弧长/净跨(缠绕度)/平均转角"""
+    parts = []
+    for qi, line in enumerate(points_np):
+        seg = np.linalg.norm(np.diff(line, axis=0), axis=-1)          # (P-1,)
+        arc = float(seg.sum())
+        span = float(np.linalg.norm(line[-1] - line[0]))
+        v = np.diff(line, axis=0)
+        v = v / np.clip(np.linalg.norm(v, axis=-1, keepdims=True), 1e-6, None)
+        cos = (v[:-1] * v[1:]).sum(-1) if len(v) > 1 else np.array([0.0])
+        turn = float((1.0 - cos).mean())
+        parts.append(f'q{qi}[arc={arc:.2f} span={span:.2f} '
+                     f'arc/span={arc / max(span, 1e-6):.2f} turn={turn:.2f}]')
+    return ' '.join(parts)
 
 
 def print_breakdown(token, bd_np):
@@ -192,6 +208,7 @@ def main():
                                            cfg.map_det_head.spread_thr)
 
             points = reg_preds[0].cpu().numpy()                     # (N, P, 2)
+            geom = geometry_str(points)
             cost_np = sample['cost'][0].numpy()                    # (H, W)
             dist_np = sample['dist_field'][0].numpy()              # (H, W)
 
@@ -215,6 +232,7 @@ def main():
                 print(f'[{idx + 1}/{len(ds)}] token={sample["token"]} '
                       f'kept={int(keep.sum())}/{len(points)}  {loss_str}')
                 print(f'    share: {share_str}')
+                print(f'    geom : {geom}')
                 idx += 1
                 if idx >= len(ds):
                     break
@@ -226,6 +244,7 @@ def main():
                 print(f'[样本 {idx}] kept={int(keep.sum())}/{len(points)} '
                       f'mean_cost={mean_cost.round(3).tolist()}  {loss_str}')
                 print(f'    share: {share_str}')
+                print(f'    geom : {geom}')
                 key = cv2.waitKey(0)
                 if key in (27, ord('q')):
                     break

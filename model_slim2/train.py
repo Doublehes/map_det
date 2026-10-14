@@ -36,9 +36,34 @@ def load_pretrained(model, checkpoint_path, device):
 
 @torch.no_grad()
 def run_val(model, loader, device):
-    """无 GT 验证: 平均采样代价 + 距离场得分 + 平均端点距"""
+    """无 GT 验证 (自监督, 无人工标注)。
+
+    把所有预测线 (B, N, P, 2) 的归一化 (u,v) 坐标汇总, 分为两类指标:
+
+    一、与监督信号相关的"正确性"指标
+        val_cost      : 预测点采样代价图的 Lp 均值。点落在低代价(可通行)区 -> 越低越好
+        val_interior  : 预测点采样距离场的平均值。值越大越靠可通行区几何中心
+                        (距离场 = 到边界的距离, 脊线处最大)
+
+    二、与监督信号无关的"几何诊断"指标 (仅看形状是否合理, 无线 GT)
+        记一条线的 P 个点为 p0..p15, 相邻段长 s_i = ||p_{i+1} - p_i||:
+
+        val_arc       : 平均弧长 = mean(Σ s_i)。即折线真实路径长度(归一化坐标)
+        val_span      : 平均净跨 = mean(||p15 - p0||)。首尾端点的直线距离
+        val_arc_span  : 缠绕度 = mean(arc / span)。1=笔直, 越大越卷曲
+                        (圆滑弯道 ~1~2; 十几以上说明打结/绕圈/塌成小团)
+        val_turn      : 平均转角 = mean(mean(1 - cosθ_i))。θ 为相邻段夹角
+                        0=全程笔直, 2=每步掉头。越小越顺
+        val_spacing_cv: 等距度 = mean(std(s) / mean(s))。段长的变异系数(尺度无关)
+                        0=各段完全等长(等距), 越大越不均匀
+
+    注: arc/span/turn/spacing_cv 均在归一化坐标上计算, 用于训练期快速判断
+    线是在"敞开、顺畅、等距", 还是打结/塌缩/输入无关(跨样本方差为 0)。
+    """
     model.eval()
-    tot = {'cost': 0.0, 'interior': 0.0, 'length': 0.0, 'count': 0.0, 'n': 0}
+    tot = {'cost': 0.0, 'interior': 0.0, 'arc': 0.0, 'span': 0.0,
+           'arc_span': 0.0, 'turn': 0.0, 'spacing_cv': 0.0,
+           'count': 0.0, 'n': 0, 'lines': 0}
     for batch in loader:
         inp = batch['input'].to(device)
         cost = batch['cost'].to(device)
@@ -49,21 +74,43 @@ def run_val(model, loader, device):
         samp_cost = sample_map(cost, points)
         samp_dist = sample_map(dist, points)
         valid = (samp_dist > 0).float().clamp_min(1e-6)
-        # length = (points[:, :, -1] - points[:, :, 0]).norm(dim=-1)
-        length = (points[:, :, 1:] - points[:, :, :-1]).norm(dim=-1).sum(dim=-1)
+
+        # ── 几何量 (每条线一个值, 均为归一化坐标) ──
+        seg = (points[:, :, 1:] - points[:, :, :-1]).norm(dim=-1)   # (B,N,P-1) 相邻段长 s_i
+        arc = seg.sum(dim=-1)                                       # (B,N) 弧长 Σs_i (真实长度)
+        span = (points[:, :, -1] - points[:, :, 0]).norm(dim=-1)    # (B,N) 净跨 ‖p15-p0‖
+
+        v = points[:, :, 1:] - points[:, :, :-1]
+        u = v / v.norm(dim=-1, keepdim=True).clamp_min(1e-6)        # 单位方向
+        cos = (u[:, :, :-1] * u[:, :, 1:]).sum(dim=-1)              # 相邻段夹角余弦
+        turn = (1.0 - cos).mean(dim=-1)                            # (B,N) 平均转角, 0=直
+        spacing_cv = seg.std(dim=-1) / seg.mean(dim=-1).clamp_min(1e-6)  # (B,N) 等距变异系数
 
         tot['cost'] += (samp_cost * valid).sum().item()
         tot['interior'] += (samp_dist * valid).sum().item()
-        tot['length'] += length.mean().item()
+        n_lines = B * N
+        tot['arc'] += arc.mean().item() * n_lines
+        tot['span'] += span.mean().item() * n_lines
+        tot['arc_span'] += (arc / span.clamp_min(1e-6)).mean().item() * n_lines
+        tot['turn'] += turn.mean().item() * n_lines
+        tot['spacing_cv'] += spacing_cv.mean().item() * n_lines
+        tot['lines'] += n_lines
         tot['count'] += float(valid.sum().item()) or B * N
         tot['n'] += 1
 
     model.train()
     c = max(tot['count'], 1.0)
+    nl = max(tot['lines'], 1)
     return {
-        'val_cost': tot['cost'] / c,                    # 越低越好
-        'val_interior': tot['interior'] / c,            # 越高越好 (越居中)
-        'val_length': tot['length'] / max(tot['n'], 1),  # 平均端点距 (归一化)
+        # 正确性 (依赖监督信号)
+        'val_cost': tot['cost'] / c,          # 采样代价, 越低越好
+        'val_interior': tot['interior'] / c,  # 采样距离场均值, 越高越好 (越居中)
+        # 几何诊断 (只看形状, 无线 GT)
+        'val_arc': tot['arc'] / nl,           # 弧长 Σs_i, 应≈区域中心线长度
+        'val_span': tot['span'] / nl,         # 净跨 ‖p15-p0‖, 应与 arc 相近
+        'val_arc_span': tot['arc_span'] / nl, # 缠绕度 arc/span: 1=笔直, ~1-2=圆滑弯道, 十几=打结/绕圈
+        'val_turn': tot['turn'] / nl,         # 平均转角: 0=笔直, 越大越折
+        'val_spacing_cv': tot['spacing_cv'] / nl,  # 等距变异系数: 0=完全等距
     }
 
 
@@ -76,7 +123,7 @@ def main():
     if os.path.exists(cfg.work_dir):
         print(f'[警告] 工作目录已存在: {cfg.work_dir}')
         import datetime
-        cfg.work_dir += f'_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}'
+        cfg.work_dir += f'_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}'
     os.makedirs(cfg.work_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=os.path.join(cfg.work_dir, 'logs'))
     print(f'[设备] {cfg.device}')
@@ -157,7 +204,7 @@ def main():
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
         }
-        torch.save(ckpt, os.path.join(cfg.work_dir, 'latest.pth'))
+        # torch.save(ckpt, os.path.join(cfg.work_dir, 'latest.pth'))
         if (epoch + 1) % cfg.checkpoint_interval == 0:
             torch.save(ckpt, os.path.join(cfg.work_dir, f'epoch_{epoch + 1}.pth'))
         print(f'[保存] {cfg.work_dir}')
