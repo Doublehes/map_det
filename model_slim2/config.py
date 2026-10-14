@@ -67,7 +67,7 @@ cfg_default = AttrDict({
         'repel_weight': 1.0,
         'repel_margin': 0.15,
         'length_weight': 1.0,
-        'min_length': 0.8,
+        'min_length': 0.4,
         'spread_weight': 0.0,
         'spread_thr': 0.9,
         'order_weight': 0.0,
@@ -80,7 +80,7 @@ cfg_default = AttrDict({
     'grad_clip_max_norm': 35.0,
     'scheduler': 'cosine',
     'warmup_iters': 100,
-    'work_dir': './work_dirs/slim2',
+    'work_dir': './work_dirs/default',
     'pretrained': '',
     'val_interval': 5,
     'cost_filter_thr': 0.3,
@@ -88,8 +88,18 @@ cfg_default = AttrDict({
     'checkpoint_interval': 10,
 })
 
+exp1 = deepcopy(cfg_default)
+exp1['map_det_head']['grow_weight'] = 0.1
+exp1['work_dir'] = './work_dirs/exp1'
+
+exp2 = deepcopy(cfg_default)
+exp2['map_det_head']['min_length'] = 0.8
+exp2['work_dir'] = './work_dirs/exp1'
+
 CONFIGS = {
     'default': cfg_default,
+    'exp1': exp1,
+    'exp2': exp2,
 }
 
 cfg = cfg_default
