@@ -15,9 +15,10 @@ from models.head import MapTRHead
 
 from .losses import (
     cost_loss, interior_loss, smooth_loss, repel_loss, arc_loss, spread_loss,
-    spacing_loss, span_loss,
+    spacing_loss, span_loss, start_gather_loss, diverge_loss,
     cost_per_query, interior_per_query, smooth_per_query, arc_per_query,
     repel_per_pair, spread_per_pair, spacing_per_query, span_per_query,
+    start_gather_per_pair, diverge_per_pair,
 )
 
 # MapTRHead.__init__ 需要但自监督用不到的字段 (占位默认值)
@@ -57,6 +58,9 @@ class Slim2Head(MapTRHead):
         self.spread_thr = cfg.get('spread_thr', 0.9)
         self.w_spacing = cfg.get('spacing_weight', 1.0)
         self.smooth_min_step_px = cfg.get('smooth_min_step_px', 2.0)
+        self.w_start_gather = cfg.get('start_gather_weight', 0.0)
+        self.w_diverge = cfg.get('diverge_weight', 0.0)
+        self.diverge_margin = cfg.get('diverge_margin', 0.2)
         self.lp_p = cfg.get('lp_p', 4.0)
 
     def init_weights(self):
@@ -112,7 +116,11 @@ class Slim2Head(MapTRHead):
         #   l_arc     : relu(min_arc - 弧长Σ‖Δp‖) ↓ → 弧长(真实长度)下界
         #   l_span    : relu(min_span - ‖p_last - p_first‖) ↓ → 端点距下界, 逼线张开成条
         #               (弧长可被原地振荡伪造, 端点距不能; 二者互补)
-        # 已关闭 (单线场景下多为 no-op, 权重置 0):
+        # 多线结构 (N>1 时生效, 默认权重 0, 见 exp3):
+        #   l_start_gather: mean_{i<j}‖p0_i - p0_j‖ ↓ → 低端聚合, 各线共享车后起点
+        #   l_diverge     : mean_{i<j}relu(margin - ‖p_last_i - p_last_j‖) ↓
+        #                   → 顶端发散, 各线车前端点互相拉开(不同岔路)
+        # 已关闭 (默认权重置 0):
         #   l_repel / l_spread
         # 注: 用 loss_shares 看各项占总损失比例(解决量纲/正负不可比), 辅助权重平衡。
         # ──────────────────────────────────────────────────────────────────
@@ -126,6 +134,8 @@ class Slim2Head(MapTRHead):
             'span': self.w_span * span_loss(reg_preds, self.min_span),
             'repel': self.w_repel * repel_loss(reg_preds, self.repel_margin),
             'spread': self.w_spread * spread_loss(reg_preds, self.spread_thr),
+            'start_gather': self.w_start_gather * start_gather_loss(reg_preds),
+            'diverge': self.w_diverge * diverge_loss(reg_preds, self.diverge_margin),
         }
         loss_dict['total'] = sum(loss_dict.values())
         return loss_dict
@@ -150,4 +160,6 @@ class Slim2Head(MapTRHead):
             'span': span_per_query(reg_preds, self.min_span),
             'repel': repel_per_pair(reg_preds, self.repel_margin),
             'spread': spread_per_pair(reg_preds, self.spread_thr),
+            'start_gather': start_gather_per_pair(reg_preds),
+            'diverge': diverge_per_pair(reg_preds, self.diverge_margin),
         }

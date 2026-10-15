@@ -180,6 +180,34 @@ def spread_per_pair(points: torch.Tensor, thr: float) -> torch.Tensor:
     return torch.relu(sim - thr)
 
 
+def start_gather_per_pair(points: torch.Tensor) -> torch.Tensor:
+    """低端聚合明细 (B, N, N): 第 i / j 条线"起点 p0"之间的距离, 对角置 0
+
+    越小越聚合 -> 多条线共享"车后"共同起点 (下端可重合)。
+    """
+    B, N, P, _ = points.shape
+    if N < 2:
+        return points.new_zeros(B, N, N)
+    p0 = points[:, :, 0, :]                               # (B, N, 2)
+    d = (p0[:, :, None, :] - p0[:, None, :, :]).norm(dim=-1)   # (B, N, N)
+    return d.masked_fill(_off_diag_mask(N, points.device)[None], 0.0)
+
+
+def diverge_per_pair(points: torch.Tensor, margin: float) -> torch.Tensor:
+    """顶端发散明细 (B, N, N): 第 i 条线"终点" 到 第 j 条线"所有点"的最小距离 < margin 的 hinge, 对角置 0
+
+    只取终点(顶端), 与其它线的全部点(含中段采样点)取最小距离 -> 防止终点压到别的线上/两线顶端重合。
+    底端不参与 -> 仍允许低端聚合(共享车后起点)。越小越分散(不同岔路)。
+    """
+    B, N, P, _ = points.shape
+    if N < 2:
+        return points.new_zeros(B, N, N)
+    pl = points[:, :, -1, :]                                  # (B, N, 2) 每条线终点
+    diff = pl[:, :, None, None, :] - points[:, None, :, :, :]  # (B, N, N, P, 2)
+    d_min = diff.norm(dim=-1).min(dim=-1)[0]                  # (B, N, N) 终点 i 到线 j 所有点的最小距离
+    return torch.relu(margin - d_min).masked_fill(_off_diag_mask(N, points.device)[None], 0.0)
+
+
 # ─────────────────────────── 聚合函数 (训练使用, 数值与原实现一致) ───────────────────────────
 
 def cost_loss(cost: torch.Tensor, points: torch.Tensor, p: float = 4.0) -> torch.Tensor:
@@ -234,6 +262,22 @@ def spread_loss(points: torch.Tensor, thr: float) -> torch.Tensor:
     if N < 2:
         return points.new_zeros(())
     return spread_per_pair(points, thr).mean()
+
+
+def start_gather_loss(points: torch.Tensor) -> torch.Tensor:
+    """低端聚合: 各线起点 p0 两两距离 (趋 0 -> 共享车后起点)"""
+    B, N, _, _ = points.shape
+    if N < 2:
+        return points.new_zeros(())
+    return start_gather_per_pair(points).sum() / (B * N * (N - 1))
+
+
+def diverge_loss(points: torch.Tensor, margin: float) -> torch.Tensor:
+    """顶端发散: 各线终点 p_last 距离 < margin 的 hinge (逼岔路终点分开)"""
+    B, N, _, _ = points.shape
+    if N < 2:
+        return points.new_zeros(())
+    return diverge_per_pair(points, margin).sum() / (B * N * (N - 1))
 
 
 def loss_shares(loss_dict: dict) -> dict:

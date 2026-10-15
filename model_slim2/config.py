@@ -82,6 +82,11 @@ cfg_default = AttrDict({
         'spread_weight': 0.0,
         'spread_thr': 0.9,
 
+        # 多线结构损失 (默认权重 0; 具体数值见 exp3)
+        'start_gather_weight': 0.0,      # 低端聚合: 各线共享车后起点
+        'diverge_weight': 0.0,           # 顶端发散: 各线车前端点互相拉开
+        'diverge_margin': 0.2,           # 顶端最小间距 (归一化)
+
         'lp_p': 4.0,                     # 线内 Lp 聚合指数 (>1 强调最差点/段, 1=均值)
     }),
 
@@ -112,10 +117,19 @@ exp2['map_det_head']['min_arc'] = 0.8
 exp2['num_epochs'] = 200
 exp2['work_dir'] = './work_dirs/exp2'
 
+exp3 = deepcopy(cfg_default)
+exp3['map_det_head']['num_queries'] = 3
+exp3['map_det_head']['spread_weight'] = 0.0
+exp3['map_det_head']['start_gather_weight'] = 1.0
+exp3['map_det_head']['diverge_weight'] = 1.0
+exp3['map_det_head']['diverge_margin'] = 0.2
+exp3['work_dir'] = './work_dirs/exp3'
+
 CONFIGS = {
     'default': cfg_default,
     'exp1': exp1,
     'exp2': exp2,
+    'exp3': exp3,
 }
 
 cfg = cfg_default

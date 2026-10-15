@@ -234,3 +234,57 @@ repel_weight=0.0, spread_weight=0.0
 2. **长度自适应/输入相关**未根治：输出已随输入变化，但仍以自监督全局先验为主；**方案 C（骨架/软带覆盖 + Chamfer）** 尚未实现。
 3. `summary.md` §5 表格为历史记录，最新以本节为准。
 
+---
+
+## 11. 迭代总结（2026-10-15）
+
+### 11.1 可通行区距离场重构（独立调试脚本）
+- **旧场问题**：`clip(dist/max_dist_px)` 宽路中心一片=1（平台）、窄路中心<1（宽路偏置）。
+- **新场（方案A，窗口归一化）**：开运算(去 < `min_road_width` 的窄结构) → `dist=距离变换`
+  → `local_max=灰度膨胀(dist, ridge_window)` → `field=clip(dist/local_max,0,1)`。
+  性质：中心恒=1、宽路衰减慢/窄路快、无平台；非可通行=0。
+- **独立脚本 `model_slim2/vis_dist_field.py`**（不接模型）：面板 `seg | old dist | window field | window+removed`
+  + 扫描行剖面图；交互 `↑/↓(w/s)` 移动扫描行、`←/A →/D/空格` 切帧、`ESC/Q` 退出。
+- 试过“最大内切圆(disk)”方案（解决宽窄交界污染）→ **效果不明显，仅删除磁盘法**，保留窗口法。
+
+### 11.2 骨架提取（scikit-image）
+- 安装：`pip install --no-deps scikit-image tifffile lazy_loader`；**核验 torch/numpy/scipy 未变**。
+- `build_skeleton` 流水线：开运算(`skel_min_width`) → 高斯平滑(`smooth`) → **只填小洞(`fill_max_area`)**
+  → 最大连通域 → `skeletonize` → 剪毛刺(`prune_len`) → 最大骨架连通分量。
+- 第 5 面板叠加：**绿=完整骨架 / 红=最长路径**；CLI `--skel-min-width/--smooth/--prune/--fill-max-area`
+  （与距离场 `--min-width` **解耦**）。
+- **修复“骨架零散”**：开阈值太小 → 交叉点多（如 tok0 47→1，提阈值+剪枝+平滑+填洞）。
+- **修复“骨架穿类别 0”**：根因是**闭运算**（把 ≤核宽的非可通行缝隙糊上，连通两块可动区）→ **移除闭运算**；
+  残留（`fill_holes` 把被可动区包围的类别0口袋也填掉）→ 改为**只填面积 ≤ `fill_max_area`(8) 的小洞**。
+
+### 11.3 距离场移植进训练
+- `dataset.py` 新增 `mask_to_dist_field_norm(...)`（**独立实现**，与 `vis_dist_field.build_field` 逐位一致，
+  实测最大差=0）；**保留**原 `mask_to_dist_field`（`dist_field_mode='old'` 仍可用）。
+- `config.data` 新增：`dist_field_mode='new'`（默认）、`dist_min_road_width=5.0`、`dist_ridge_window=30.0`。
+
+### 11.4 初始化方向改为“自下而上”
+- `head.init_weights`：`v = torch.linspace(0.9, 0.1, P)`（首点在下=车后，末点在上=车前）；
+  验证首点 `(0.5,0.9)`、末点 `(0.5,0.1)`。
+
+### 11.5 多线实验：低端聚合 + 顶端发散（exp3, N=3）
+- 目标：N=3 线（直行/左转/右转）；**底端共享车后起点、顶端发散表示不同岔路**。
+- 新增损失：`start_gather`（各线起点 `p0` 两两距离，趋 0=聚合）、
+  `diverge`（各线终点 `p_last` 相关排斥=发散）。
+- 接线：`head.loss/loss_breakdown`；`infer` per-pair 热力图 `repel | spread | start_gather | diverge`。
+- 配置：`default` 两项权重=0（`diverge_margin=0.2`）；`exp3` 设
+  `num_queries=3, start_gather_weight=1.0, diverge_weight=1.0, diverge_margin=0.2, spread_weight=0`。
+- 初始态（3 query 完全相同）：`start_gather=0`、`diverge=0.2`。
+- 短训（1440 步，无 NaN）：**底端 `p0` 均距≈0.003**（聚合）、**顶端 `p_last` 均距≈0.158**（发散）。
+- **重设计 `diverge`**：由“终点↔终点距离”改为 **“终点 → 其它线全部点的最小距离”**
+  （点-点 min，免去点到线段；16 点密集，误差≈半段长）。单元验证：终点压在别线上→被罚、远离→0、对角=0。
+- **未达标**：重设计后“终点到别线的最小距离（最差对）”仅 **0.022**（期望 ≥~0.1）→ 分散**缓解未根除**。
+
+### 11.6 遗留 / 后续
+1. **顶端分散不够**：可选加大 `diverge_weight`/`diverge_margin`、延长训练，或改为**顶端 k 点**排斥，
+   或回到“点到线段”。
+2. **单路图**：多余线会被迫摊开（与 `interior/cost` 冲突）→ 需**有效性 C1（最近线覆盖）/骨架分支 C4/方向约束**。
+3. **方向约束**未加（靠初始化先验；`p_last` 视为顶端，翻转风险仍在）。
+4. **骨架“穿类别 0”**：`vis_dist_field.py` 全库仍 23/644 有 ≤3px 越界（源于平滑+小开阈值）；
+   是否加严格兜底 `skel &= 可动区` 未定；**该脚本未接入训练**。
+5. `interior_weight` 是否需因**新距离场分布变化**而重调，未定。
+

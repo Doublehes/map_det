@@ -46,7 +46,7 @@ def draw_pred_lines(canvas: np.ndarray, points: np.ndarray) -> np.ndarray:
         for i in range(len(pts) - 1):
             cv2.arrowedLine(img, tuple(pts[i]), tuple(pts[i + 1]), color, 2, tipLength=0.3)
         cv2.circle(img, tuple(pts[0]), 4, color, -1)
-        cv2.putText(img, f'q{qi}', tuple(pts[0] + [6, -6]),
+        cv2.putText(img, f'q{qi}', tuple(pts[-1] + [6, -6]),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
     return img
 
@@ -140,12 +140,14 @@ def render_pair_heatmap(matrix, title, vmax, cell=44):
     return canvas
 
 
-def render_loss_panel(bd_np, margin, thr):
-    """per-pair 热力图面板: repel | spread (N×N)"""
+def render_loss_panel(bd_np, margin, thr, diverge_margin=0.2):
+    """per-pair 热力图面板: repel | spread | start_gather | diverge (N×N)"""
     repel = render_pair_heatmap(bd_np['repel'], f'repel (margin={margin})', margin)
     spread = render_pair_heatmap(bd_np['spread'], f'spread (thr={thr})', 1.0 - thr)
+    gather = render_pair_heatmap(bd_np['start_gather'], 'start_gather', 0.5)
+    diverge = render_pair_heatmap(bd_np['diverge'], f'diverge (margin={diverge_margin})', diverge_margin)
     sep = np.full((repel.shape[0], 5, 3), 255, np.uint8)
-    return np.concatenate([repel, sep, spread], axis=1)
+    return np.concatenate([repel, sep, spread, sep, gather, sep, diverge], axis=1)
 
 
 def main():
@@ -205,7 +207,8 @@ def main():
             bd_np = {k: v[0].cpu().numpy() for k, v in bd.items()}
             print_breakdown(sample['token'], bd_np)
             loss_panel = render_loss_panel(bd_np, cfg.map_det_head.repel_margin,
-                                           cfg.map_det_head.spread_thr)
+                                           cfg.map_det_head.spread_thr,
+                                           cfg.map_det_head.diverge_margin)
 
             points = reg_preds[0].cpu().numpy()                     # (N, P, 2)
             geom = geometry_str(points)
