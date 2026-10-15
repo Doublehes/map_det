@@ -67,12 +67,12 @@ class Slim2Head(MapTRHead):
         容易塌进局部极小。这里改为初始即为一条竖向直线, 起步就满足
         arc/span/spacing/smooth, 绕开塌缩盆地。
 
-        先验直线(归一化 u,v; u→宽, v→高): u 居中 0.5, v 从 0.1 铺到 0.9。
+        先验直线(归一化 u,v; u→宽, v→高): u 居中 0.5, v 从 0.9 铺到 0.1 (首点在下, 自下而上)。
         """
         super().init_weights()
         P = self.num_points
         u = torch.full((P,), 0.5)
-        v = torch.linspace(0.1, 0.9, P)
+        v = torch.linspace(0.9, 0.1, P)
         line = torch.stack([u, v], dim=-1).reshape(-1)      # (2P,) [u0,v0,u1,v1,...]
         line = line.clamp(1e-4, 1 - 1e-4)
         logit = torch.log(line / (1 - line))                # 反 sigmoid

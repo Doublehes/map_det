@@ -20,7 +20,10 @@ cfg_default = AttrDict({
         'cost_values': {0: 1.0, 1: 0.5, 2: 0.01, 3: 1.0},  # [0,1] 1.0=最高代价
         'ignore_cost': 1.0,
         'cost_sigma': 3.0,               # 代价图高斯平滑 sigma (像素)
-        'dist_max_px': 10.0,             # 距离场归一化上限 (像素)
+        'dist_max_px': 10.0,             # [旧场] 距离场归一化上限 (像素)
+        'dist_field_mode': 'new',        # 距离场模式: 'new'=窗口归一化场(默认) | 'old'=原实现
+        'dist_min_road_width': 5.0,      # [新场] 开运算剔除 < 该宽度的窄结构 (像素)
+        'dist_ridge_window': 30.0,       # [新场] 局部最大(脊线高度)窗口半径 (像素)
         'val_ratio': 0.1,
         'seed': 42,
         # 几何增强 (只作用于标签图, 信号同源派生)

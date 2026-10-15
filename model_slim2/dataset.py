@@ -52,6 +52,40 @@ def mask_to_dist_field(mask: np.ndarray, drivable_classes: tuple,
     return out
 
 
+def mask_to_dist_field_norm(mask: np.ndarray, drivable_classes: tuple, ignore_index: int,
+                            min_road_width_px: float, ridge_window_px: float) -> np.ndarray:
+    """【新版】可通行区距离场: 按局部最大(脊线高度)归一化, 中心=1 两边衰减; 非可通行区置 0
+
+    与 vis_dist_field.build_field 数学一致(独立实现):
+      开运算去 < min_road_width_px 的窄结构 -> 到边界距离 dist
+      -> local_max = 灰度膨胀(dist, ridge_window_px) (≈该处路半宽)
+      -> field = clip(dist / local_max, 0, 1)
+    效果: 中心恒为 1 (任何宽度), 宽路衰减慢 / 窄路衰减快, 无平台; 消除宽路偏置。
+    """
+    drivable = np.zeros(mask.shape, dtype=np.uint8)
+    for c in drivable_classes:
+        drivable[mask == c] = 1
+    drivable[mask == ignore_index] = 0
+
+    # 1) 开运算剔除窄结构
+    r = max(1, int(round(min_road_width_px / 2.0)))
+    ell = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    fg_open = cv2.morphologyEx(drivable, cv2.MORPH_OPEN, ell)
+
+    # 2) 到边界距离
+    dist = cv2.distanceTransform(fg_open, cv2.DIST_L2, 5)
+
+    # 3) 局部最大 = 脊线高度 (灰度膨胀 = 最大滤波)
+    R = max(1, int(round(ridge_window_px)))
+    ell2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * R + 1, 2 * R + 1))
+    local_max = np.maximum(cv2.dilate(dist, ell2), 1e-6)
+
+    # 4) 按局部半宽归一化: 中心=1, 宽慢窄快, 无平台
+    field = np.clip(dist / local_max, 0.0, 1.0).astype(np.float32)
+    field[fg_open == 0] = 0.0
+    return field
+
+
 def augment_mask(mask: np.ndarray, cfg) -> np.ndarray:
     """对标签图做几何增强: flip → rotate → bend (全部最近邻, 标签安全)"""
     h, w = mask.shape
@@ -123,8 +157,14 @@ class Slim2Dataset(Dataset):
         inp = mask_to_onehot(mask, self.cfg.num_classes, self.cfg.ignore_index)
         cost = mask_to_cost(mask, self.cfg.cost_values, self.cfg.ignore_cost,
                             self.cfg.ignore_index, self.cfg.cost_sigma)
-        dist = mask_to_dist_field(mask, tuple(self.cfg.drivable_classes),
-                                  self.cfg.ignore_index, self.cfg.dist_max_px)
+        if self.cfg.get('dist_field_mode', 'new') == 'new':
+            dist = mask_to_dist_field_norm(
+                mask, tuple(self.cfg.drivable_classes), self.cfg.ignore_index,
+                self.cfg.get('dist_min_road_width', 5.0),
+                self.cfg.get('dist_ridge_window', 30.0))
+        else:
+            dist = mask_to_dist_field(mask, tuple(self.cfg.drivable_classes),
+                                      self.cfg.ignore_index, self.cfg.dist_max_px)
 
         return {
             'input': torch.from_numpy(inp),                      # (C+1, H, W)
