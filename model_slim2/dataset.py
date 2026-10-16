@@ -52,12 +52,23 @@ def mask_to_dist_field(mask: np.ndarray, drivable_classes: tuple,
     return out
 
 
+def _largest_cc(mask: np.ndarray, connectivity: int = 8) -> np.ndarray:
+    """取最大连通域 (bool) —— 与 vis_dist_field._largest_cc 一致"""
+    m = mask.astype(np.uint8)
+    n, lab = cv2.connectedComponents(m, connectivity=connectivity)
+    if n <= 2:
+        return mask.astype(bool)
+    sizes = [int((lab == k).sum()) for k in range(1, n)]
+    return lab == (1 + int(np.argmax(sizes)))
+
+
 def mask_to_dist_field_norm(mask: np.ndarray, drivable_classes: tuple, ignore_index: int,
                             min_road_width_px: float, ridge_window_px: float) -> np.ndarray:
     """【新版】可通行区距离场: 按局部最大(脊线高度)归一化, 中心=1 两边衰减; 非可通行区置 0
 
     与 vis_dist_field.build_field 数学一致(独立实现):
-      开运算去 < min_road_width_px 的窄结构 -> 到边界距离 dist
+      开运算去 < min_road_width_px 的窄结构 -> 只保留最大可通行连通域(8 邻接)
+      -> 到边界距离 dist
       -> local_max = 灰度膨胀(dist, ridge_window_px) (≈该处路半宽)
       -> field = clip(dist / local_max, 0, 1)
     效果: 中心恒为 1 (任何宽度), 宽路衰减慢 / 窄路衰减快, 无平台; 消除宽路偏置。
@@ -72,6 +83,9 @@ def mask_to_dist_field_norm(mask: np.ndarray, drivable_classes: tuple, ignore_in
     ell = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
     fg_open = cv2.morphologyEx(drivable, cv2.MORPH_OPEN, ell)
 
+    # 1b) 只保留最大可通行连通域 (8 邻接), 删掉其它小块可通行区
+    fg_open = _largest_cc(fg_open > 0, 8).astype(np.uint8)
+
     # 2) 到边界距离
     dist = cv2.distanceTransform(fg_open, cv2.DIST_L2, 5)
 
@@ -84,6 +98,46 @@ def mask_to_dist_field_norm(mask: np.ndarray, drivable_classes: tuple, ignore_in
     field = np.clip(dist / local_max, 0.0, 1.0).astype(np.float32)
     field[fg_open == 0] = 0.0
     return field
+
+
+def extract_keypoints_lm(field: np.ndarray, win: float = 2.0, eps: float = 0.02,
+                         field_floor: float = 0.5, v_front: float = 0.7,
+                         d_min: float = 0.05, max_pts: int = 100):
+    """从归一化窗口场 field 提取"车前关键点": 局部极大 + 强度下限 + 只看车前 + 间隔NMS
+
+    独立实现, 与 vis_dist_field.extract_keypoints_lm 数学一致 (仅依赖 numpy + cv2)。
+
+    field: (H, W) float32 [0,1] 窗口距离场 (mask_to_dist_field_norm 输出; 前景 = field > 0)
+    返回 [(u, v, field_val), ...] 按 u 排序(左->右), 最多 max_pts 个。
+    """
+    H, W = field.shape
+    if field.sum() == 0:
+        return []
+    r = max(1, int(win))
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    mx = cv2.dilate(field, kern)
+    cand_mask = (field >= mx - eps) & (field > 0)       # 局部极大(含平台)
+    ys, xs = np.where(cand_mask)
+    cands = []
+    for y, x in zip(ys.tolist(), xs.tolist()):
+        dv = float(field[y, x])
+        if dv < field_floor:
+            continue
+        u = x / (W - 1)
+        v = y / (H - 1)
+        if v > v_front:                                 # 只看车前 (v=0 顶部=车前)
+            continue
+        cands.append((u, v, dv))
+
+    cands.sort(key=lambda t: -t[2])                     # 按脊线强度降序
+    kept = []
+    for (u, v, dv) in cands:                            # 间隔 NMS
+        if all((u - ku) ** 2 + (v - kv) ** 2 >= d_min * d_min for (ku, kv, _) in kept):
+            kept.append((u, v, dv))
+            if len(kept) >= max_pts:
+                break
+    kept.sort(key=lambda t: t[0])                       # 按 u 左->右
+    return kept
 
 
 def augment_mask(mask: np.ndarray, cfg) -> np.ndarray:
@@ -166,11 +220,29 @@ class Slim2Dataset(Dataset):
             dist = mask_to_dist_field(mask, tuple(self.cfg.drivable_classes),
                                       self.cfg.ignore_index, self.cfg.dist_max_px)
 
+        # 关键点: 复用已算好的窗口场 dist(=field), 不重算距离变换
+        kp_max = int(self.cfg.get('kp_max', 100))
+        kp_list = extract_keypoints_lm(
+            dist,
+            win=self.cfg.get('kp_win', 2.0),
+            eps=self.cfg.get('kp_eps', 0.02),
+            field_floor=self.cfg.get('kp_field_floor', 0.5),
+            v_front=self.cfg.get('kp_vfront', 0.7),
+            d_min=self.cfg.get('kp_dmin', 0.1),
+            max_pts=kp_max)
+        keypoints = np.zeros((kp_max, 2), dtype=np.float32)      # (K, 2) 补 0
+        keypoints_valid = np.zeros((kp_max,), dtype=np.float32)  # (K,) 真实=1
+        for i, (u, v, _) in enumerate(kp_list[:kp_max]):
+            keypoints[i] = (u, v)
+            keypoints_valid[i] = 1.0
+
         return {
             'input': torch.from_numpy(inp),                      # (C+1, H, W)
             'cost': torch.from_numpy(cost).unsqueeze(0),         # (1, H, W)
             'dist_field': torch.from_numpy(dist).unsqueeze(0),   # (1, H, W)
             'mask': torch.from_numpy(mask.astype(np.int64)),     # (H, W)
+            'keypoints': torch.from_numpy(keypoints),            # (K, 2)
+            'keypoints_valid': torch.from_numpy(keypoints_valid),  # (K,)
             'token': path.stem,
         }
 
@@ -182,5 +254,7 @@ def collate_fn(batch):
         'cost': torch.stack([b['cost'] for b in batch], dim=0),
         'dist_field': torch.stack([b['dist_field'] for b in batch], dim=0),
         'mask': torch.stack([b['mask'] for b in batch], dim=0),
+        'keypoints': torch.stack([b['keypoints'] for b in batch], dim=0),
+        'keypoints_valid': torch.stack([b['keypoints_valid'] for b in batch], dim=0),
         'token': [b['token'] for b in batch],
     }

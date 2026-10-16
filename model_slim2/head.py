@@ -16,6 +16,7 @@ from models.head import MapTRHead
 from .losses import (
     cost_loss, interior_loss, smooth_loss, repel_loss, arc_loss, spread_loss,
     spacing_loss, span_loss, start_gather_loss, diverge_loss,
+    keypoint_coverage_loss, keypoint_coverage_per_kp,
     cost_per_query, interior_per_query, smooth_per_query, arc_per_query,
     repel_per_pair, spread_per_pair, spacing_per_query, span_per_query,
     start_gather_per_pair, diverge_per_pair,
@@ -61,41 +62,58 @@ class Slim2Head(MapTRHead):
         self.w_start_gather = cfg.get('start_gather_weight', 0.0)
         self.w_diverge = cfg.get('diverge_weight', 0.0)
         self.diverge_margin = cfg.get('diverge_margin', 0.2)
+        self.w_kp_coverage = cfg.get('keypoint_coverage_weight', 0.0)
+        self.kp_coverage_thr = cfg.get('keypoint_coverage_thr', 0.05)
         self.lp_p = cfg.get('lp_p', 4.0)
 
     def init_weights(self):
-        """在基类 xavier 初始化基础上, 把初始预测/采样点设为一条先验直线。
+        """在基类 xavier 初始化基础上, 把初始采样/预测点设为一组先验竖直线。
 
         默认初始下 reference_points_embed 与 reg_branch 末层(xavier)输出≈0,
         经 sigmoid ≈ 0.5 -> 16 个点叠在图像中心成"一团", 导致训练对初值敏感、
-        容易塌进局部极小。这里改为初始即为一条竖向直线, 起步就满足
+        容易塌进局部极小。这里改为初始即为竖直线, 起步就满足
         arc/span/spacing/smooth, 绕开塌缩盆地。
 
-        先验直线(归一化 u,v; u→宽, v→高): u 居中 0.5, v 从 0.9 铺到 0.1 (首点在下, 自下而上)。
+        多条 query: 第 n 条 query 的参考线 = (u_n, v_p), 其中
+          u_n = linspace(0.2, 0.8, N)  (N=1 时取 0.5) —— 各 query 的 u 均匀铺开
+          v_p = linspace(0.9, 0.1, P)  (所有 query 共享; 首点在下, 自下而上)
+        reference_points_embed 是逐 query 调用的 Linear, 这里用 pinv 精确拟合
+        (保留 query_embedding 的随机初始化), 使 ref_points = sigmoid(Q @ Wᵀ) 恰好等于目标线。
+        reg_branches 末层为共享 Linear(bias 无法 per-query), 保持中心先验 (u=0.5)。
         """
         super().init_weights()
-        P = self.num_points
-        u = torch.full((P,), 0.5)
+        N, P, D = self.num_queries, self.num_points, self.embed_dims
+        assert N <= D, f'num_queries({N}) 不能超过 embed_dims({D})'
+        u = torch.full((N,), 0.5) if N == 1 else torch.linspace(0.2, 0.8, N)
         v = torch.linspace(0.9, 0.1, P)
-        line = torch.stack([u, v], dim=-1).reshape(-1)      # (2P,) [u0,v0,u1,v1,...]
-        line = line.clamp(1e-4, 1 - 1e-4)
-        logit = torch.log(line / (1 - line))                # 反 sigmoid
+        U = u[:, None].expand(N, P)
+        V = v[None, :].expand(N, P)
+        coords = torch.stack([U, V], dim=-1).clamp(1e-4, 1 - 1e-4)   # (N, P, 2)
+        L = torch.log(coords / (1 - coords)).reshape(N, 2 * P)        # (N, 2P) 目标 logits
         with torch.no_grad():
-            # (1) 采样参考点层: 初始采样位置 = 先验直线
-            self.reference_points_embed.weight.zero_()
-            self.reference_points_embed.bias.copy_(logit)
-            # (2) 回归分支末层: 初始预测 = 先验直线 (各层共享同一对象)
+            # (1) 采样参考点层: 精确 per-query (Q @ Wᵀ = L, Q=query_embedding.weight 随机保留)
+            Q = self.query_embedding.weight                              # (N, D)
+            W = (torch.linalg.pinv(Q) @ L).t()                           # (2P, D)
+            self.reference_points_embed.weight.copy_(W)
+            self.reference_points_embed.bias.zero_()
+            # (2) 回归分支末层: 共享中心先验 (u=0.5, v=0.9->0.1; 各层共享同一对象)
+            ctr = torch.stack([torch.full((P,), 0.5), v], dim=-1).reshape(-1)
+            ctr = ctr.clamp(1e-4, 1 - 1e-4)
+            ctr_logit = torch.log(ctr / (1 - ctr))
             for branch in self.reg_branches:
                 branch[-1].weight.zero_()
-                branch[-1].bias.copy_(logit)
+                branch[-1].bias.copy_(ctr_logit)
 
-    def loss(self, cls_scores, reg_preds, cost, dist_field):
+    def loss(self, cls_scores, reg_preds, cost, dist_field,
+             keypoints=None, keypoints_valid=None):
         """自监督损失: 采样代价图/距离场 + 正则
 
         cls_scores: (B, N, num_classes) logits (自监督下不参与损失)
         reg_preds:  (B, N, num_points, 2) 归一化 (u,v)
         cost:       (B, 1, H, W) 代价图 [0,1]
         dist_field: (B, 1, H, W) 可通行区距离场 [0,1]
+        keypoints:  (B, K, 2) 归一化关键点 (可为 None; 补 0 占位由 keypoints_valid 过滤)
+        keypoints_valid: (B, K) 1=真实关键点, 0=占位
         Returns: loss dict (含 'total')
         """
         device = reg_preds.device
@@ -120,11 +138,21 @@ class Slim2Head(MapTRHead):
         #   l_start_gather: mean_{i<j}‖p0_i - p0_j‖ ↓ → 低端聚合, 各线共享车后起点
         #   l_diverge     : mean_{i<j}relu(margin - ‖p_last_i - p_last_j‖) ↓
         #                   → 顶端发散, 各线车前端点互相拉开(不同岔路)
+        # 关键点覆盖率 (默认权重 0, 见 exp4):
+        #   l_keypoint_coverage: mean_k relu(d_k - thr) ↓
+        #                   d_k = 关键点 k 到所有预测点(全部线×全部点)的最近点距;
+        #                   d_k<=thr 视为已覆盖(不罚), 最小化它=最大化覆盖率
         # 已关闭 (默认权重置 0):
         #   l_repel / l_spread
         # 注: 用 loss_shares 看各项占总损失比例(解决量纲/正负不可比), 辅助权重平衡。
         # ──────────────────────────────────────────────────────────────────
         img_hw = cost.shape[-2:]
+        if keypoints is not None:
+            kp_valid = None if keypoints_valid is None else keypoints_valid.to(device)
+            l_kp_coverage = self.w_kp_coverage * keypoint_coverage_loss(
+                reg_preds, keypoints.to(device), self.kp_coverage_thr, kp_valid)
+        else:
+            l_kp_coverage = reg_preds.new_zeros(())
         loss_dict = {
             'cost': self.w_cost * cost_loss(cost, reg_preds, self.lp_p),
             'interior': self.w_interior * interior_loss(dist_field, reg_preds, self.lp_p),
@@ -136,22 +164,24 @@ class Slim2Head(MapTRHead):
             'spread': self.w_spread * spread_loss(reg_preds, self.spread_thr),
             'start_gather': self.w_start_gather * start_gather_loss(reg_preds),
             'diverge': self.w_diverge * diverge_loss(reg_preds, self.diverge_margin),
+            'keypoint_coverage': l_kp_coverage,
         }
         loss_dict['total'] = sum(loss_dict.values())
         return loss_dict
 
-    def loss_breakdown(self, cls_scores, reg_preds, cost, dist_field):
+    def loss_breakdown(self, cls_scores, reg_preds, cost, dist_field, keypoints=None):
         """返回未聚合的逐项损失明细 (供调试/可视化逐项查看)
 
         Returns: dict
             per-query (B, N): cost / interior / smooth / spacing / arc / span
             per-pair  (B, N, N): repel / spread (对角为 0)
+            per-kp    (B, K): keypoint_coverage (仅当提供 keypoints 时)
         """
         device = reg_preds.device
         cost = cost.to(device)
         dist_field = dist_field.to(device)
         img_hw = cost.shape[-2:]
-        return {
+        out = {
             'cost': cost_per_query(cost, reg_preds, self.lp_p),
             'interior': interior_per_query(dist_field, reg_preds, self.lp_p),
             'smooth': smooth_per_query(reg_preds, img_hw, self.smooth_min_step_px, self.lp_p),
@@ -163,3 +193,7 @@ class Slim2Head(MapTRHead):
             'start_gather': start_gather_per_pair(reg_preds),
             'diverge': diverge_per_pair(reg_preds, self.diverge_margin),
         }
+        if keypoints is not None:
+            out['keypoint_coverage'] = keypoint_coverage_per_kp(
+                reg_preds, keypoints.to(device), self.kp_coverage_thr)
+        return out

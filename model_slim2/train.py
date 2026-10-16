@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import model_slim2.config as cfg_module
 from model_slim2.dataset import Slim2Dataset, collate_fn
-from model_slim2.losses import sample_map, loss_shares
+from model_slim2.losses import sample_map, loss_shares, keypoint_coverage_rate
 from model_slim2.model import Slim2Model
 
 
@@ -35,7 +35,7 @@ def load_pretrained(model, checkpoint_path, device):
 
 
 @torch.no_grad()
-def run_val(model, loader, device):
+def run_val(model, loader, device, kp_thr=0.05):
     """无 GT 验证 (自监督, 无人工标注)。
 
     把所有预测线 (B, N, P, 2) 的归一化 (u,v) 坐标汇总, 分为两类指标:
@@ -57,12 +57,17 @@ def run_val(model, loader, device):
         val_spacing_cv: 等距度 = mean(std(s) / mean(s))。段长的变异系数(尺度无关)
                         0=各段完全等长(等距), 越大越不均匀
 
+    另:
+        val_kp_coverage: 关键点覆盖率 = 有效关键点中"到最近预测点距离 <= kp_thr"的比例
+                         (依赖监督信号; 越高越好)
+
     注: arc/span/turn/spacing_cv 均在归一化坐标上计算, 用于训练期快速判断
     线是在"敞开、顺畅、等距", 还是打结/塌缩/输入无关(跨样本方差为 0)。
     """
     model.eval()
     tot = {'cost': 0.0, 'interior': 0.0, 'arc': 0.0, 'span': 0.0,
            'arc_span': 0.0, 'turn': 0.0, 'spacing_cv': 0.0,
+           'kp_covered': 0.0, 'kp_n': 0.0,
            'count': 0.0, 'n': 0, 'lines': 0}
     for batch in loader:
         inp = batch['input'].to(device)
@@ -70,6 +75,17 @@ def run_val(model, loader, device):
         dist = batch['dist_field'].to(device)
         _, points = model(inp)
         B, N, P, _ = points.shape
+
+        # 关键点覆盖率: 有效关键点中 d<=thr 的比例 (依赖监督信号, 越高越好)
+        kps = batch.get('keypoints')
+        if kps is not None:
+            kps = kps.to(device)
+            kp_valid = batch['keypoints_valid'].to(device)
+            n_valid = float(kp_valid.sum().item())
+            if n_valid > 0:
+                rate = keypoint_coverage_rate(points, kps, kp_thr, kp_valid)
+                tot['kp_covered'] += rate.item() * n_valid
+                tot['kp_n'] += n_valid
 
         samp_cost = sample_map(cost, points)
         samp_dist = sample_map(dist, points)
@@ -111,6 +127,8 @@ def run_val(model, loader, device):
         'val_arc_span': tot['arc_span'] / nl, # 缠绕度 arc/span: 1=笔直, ~1-2=圆滑弯道, 十几=打结/绕圈
         'val_turn': tot['turn'] / nl,         # 平均转角: 0=笔直, 越大越折
         'val_spacing_cv': tot['spacing_cv'] / nl,  # 等距变异系数: 0=完全等距
+        # 关键点覆盖率 (依赖监督信号, 越高越好)
+        'val_kp_coverage': tot['kp_covered'] / max(tot['kp_n'], 1.0),
     }
 
 
@@ -210,7 +228,8 @@ def main():
         print(f'[保存] {cfg.work_dir}')
 
         if val_loader is not None and (epoch + 1) % cfg.val_interval == 0:
-            metrics = run_val(model, val_loader, cfg.device)
+            metrics = run_val(model, val_loader, cfg.device,
+                              cfg.map_det_head.get('keypoint_coverage_thr', 0.05))
             print(f'[Val Epoch {epoch + 1}] ' +
                   ' '.join(f'{k}={v:.4f}' for k, v in metrics.items()))
             for k, v in metrics.items():

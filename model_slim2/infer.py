@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import model_slim2.config as cfg_module
 from model_slim2.dataset import Slim2Dataset
-from model_slim2.losses import sample_map, loss_shares
+from model_slim2.losses import sample_map, loss_shares, keypoint_coverage_rate
 from model_slim2.model import Slim2Model
 
 CLASS_COLORS = {0: (0, 0, 255), 1: (0, 255, 0), 2: (200, 200, 200), 3: (0, 255, 255)}
@@ -51,8 +51,35 @@ def draw_pred_lines(canvas: np.ndarray, points: np.ndarray) -> np.ndarray:
     return img
 
 
-def render(sample, points_np, cost_np, dist_np, ignore_index, kept, total):
-    """四联面板: 分割上色 | 代价图(JET) | 距离场(VIRIDIS) | 预测线叠加距离场"""
+def render_keypoints(kp_vis: np.ndarray, points_np: np.ndarray,
+                     kps_np, kp_valid_np, v_front: float) -> None:
+    """在 kp_vis 上叠加 预测线/预测点 + v_front 分界线 + 关键点(黄圈+序号)"""
+    h, w = kp_vis.shape[:2]
+    for qi, line in enumerate(points_np):                      # 预测线(细) + 预测点(实心)
+        color = LINE_COLORS[qi % len(LINE_COLORS)]
+        pts = [[int(np.clip(u, 0, 1) * (w - 1)), int(np.clip(v, 0, 1) * (h - 1))] for u, v in line]
+        for i in range(len(pts) - 1):
+            cv2.line(kp_vis, tuple(pts[i]), tuple(pts[i + 1]), color, 1, cv2.LINE_AA)
+        for pt in pts:
+            cv2.circle(kp_vis, tuple(pt), 2, color, -1, cv2.LINE_AA)
+
+    vf_row = int(round(v_front * (h - 1)))                     # 车前分界线
+    cv2.line(kp_vis, (0, vf_row), (w - 1, vf_row), (0, 200, 200), 1, cv2.LINE_AA)
+
+    if kps_np is None:                                        # 关键点
+        return
+    for i, (u, v) in enumerate(kps_np):
+        if kp_valid_np is not None and kp_valid_np[i] <= 0:
+            continue
+        cx, cy = int(round(u * (w - 1))), int(round(v * (h - 1)))
+        cv2.circle(kp_vis, (cx, cy), 3, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(kp_vis, str(i), (cx + 5, cy + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35, (0, 255, 255), 1, cv2.LINE_AA)
+
+
+def render(sample, points_np, cost_np, dist_np, ignore_index, kept, total,
+           kps_np=None, kp_valid_np=None, v_front=0.7, cov_str=''):
+    """五联面板: 分割上色 | 代价图(JET) | 距离场(VIRIDIS) | 预测线叠加距离场 | 关键点"""
     mask = sample['mask'].numpy()
     cost8 = (np.clip(cost_np, 0, 1) * 255).astype(np.uint8)
     cost_vis = cv2.applyColorMap(cost8, cv2.COLORMAP_JET)
@@ -60,11 +87,15 @@ def render(sample, points_np, cost_np, dist_np, ignore_index, kept, total):
     dist_vis = cv2.applyColorMap(dist8, cv2.COLORMAP_VIRIDIS)
     pred_vis = draw_pred_lines(dist_vis, points_np)
 
+    kp_vis = (colorize_mask(mask, ignore_index) * 0.5).astype(np.uint8)
+    render_keypoints(kp_vis, points_np, kps_np, kp_valid_np, v_front)
+
     panels = [
         ('seg', colorize_mask(mask, ignore_index)),
         ('cost', cost_vis),
         ('dist', dist_vis),
         ('pred@dist', pred_vis),
+        ('keypoints', kp_vis),
     ]
     for name, p in panels:
         cv2.putText(p, name, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
@@ -78,8 +109,10 @@ def render(sample, points_np, cost_np, dist_np, ignore_index, kept, total):
         parts.append(p)
     body = np.concatenate(parts, axis=1)
 
+    n_kp = int(kp_valid_np.sum()) if kp_valid_np is not None else 0
     header = np.full((30, body.shape[1], 3), 30, dtype=np.uint8)
-    cv2.putText(header, f'token={sample["token"]}  kept={kept}/{total}',
+    cv2.putText(header, f'token={sample["token"]}  kept={kept}/{total}  '
+                        f'kp={n_kp}  {cov_str}',
                 (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
     return np.concatenate([header, body], axis=0)
 
@@ -195,6 +228,8 @@ def main():
             batch = {
                 'cost': sample['cost'].unsqueeze(0).to(cfg.device),
                 'dist_field': sample['dist_field'].unsqueeze(0).to(cfg.device),
+                'keypoints': sample['keypoints'].unsqueeze(0).to(cfg.device),
+                'keypoints_valid': sample['keypoints_valid'].unsqueeze(0).to(cfg.device),
             }
             loss_dict = model.compute_loss(cls_scores, reg_preds, batch)
             loss_str = ' '.join(f'{k}={v.item():.3f}' for k, v in loss_dict.items())
@@ -203,7 +238,8 @@ def main():
 
             # 逐项 loss 明细: 5×per-query + 2×per-pair
             bd = model.head.loss_breakdown(cls_scores, reg_preds,
-                                           batch['cost'], batch['dist_field'])
+                                           batch['cost'], batch['dist_field'],
+                                           batch['keypoints'])
             bd_np = {k: v[0].cpu().numpy() for k, v in bd.items()}
             print_breakdown(sample['token'], bd_np)
             loss_panel = render_loss_panel(bd_np, cfg.map_det_head.repel_margin,
@@ -226,8 +262,21 @@ def main():
             keep = mean_cost < thr
             kept_points = points[keep] if keep.any() else points[:0]
 
+            # 关键点覆盖率 (与训练一致: 用全部预测点)
+            kps_np = sample['keypoints'].numpy()                   # (K, 2)
+            kp_valid_np = sample['keypoints_valid'].numpy()        # (K,)
+            kp_thr = cfg.map_det_head.get('keypoint_coverage_thr', 0.05)
+            cov = keypoint_coverage_rate(
+                torch.from_numpy(points)[None].to(cfg.device),
+                torch.from_numpy(kps_np)[None].to(cfg.device),
+                kp_thr,
+                torch.from_numpy(kp_valid_np)[None].to(cfg.device)).item()
+            cov_str = f'cov={cov:.2f}'
+
             panel = render(sample, kept_points, cost_np, dist_np,
-                           cfg.data.ignore_index, int(keep.sum()), len(points))
+                           cfg.data.ignore_index, int(keep.sum()), len(points),
+                           kps_np, kp_valid_np,
+                           cfg.data.get('kp_vfront', 0.7), cov_str)
 
             if save_dir:
                 cv2.imwrite(str(save_dir / f'{sample["token"]}.png'), panel)

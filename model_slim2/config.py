@@ -24,6 +24,14 @@ cfg_default = AttrDict({
         'dist_field_mode': 'new',        # 距离场模式: 'new'=窗口归一化场(默认) | 'old'=原实现
         'dist_min_road_width': 5.0,      # [新场] 开运算剔除 < 该宽度的窄结构 (像素)
         'dist_ridge_window': 30.0,       # [新场] 局部最大(脊线高度)窗口半径 (像素)
+        # 车前关键点提取 (从窗口场 dist_field 局部极大提取; 见 dataset.extract_keypoints_lm)
+        'kp_win': 2.0,                   # 局部极大窗口半径 (px)
+        'kp_eps': 0.02,                  # 平台容差 (字段单位 [0,1])
+        'kp_field_floor': 0.5,           # 字段强度下限 [0,1]
+        'kp_dmin': 0.05,                  # 关键点最小间隔 (归一化, NMS)
+        'kp_max': 100,                   # 最多关键点个数 (同时也是 padding 长度)
+        'kp_vfront': 0.7,                # 只看车前: 保留 v <= 该值 (v=0 顶部=车前)
+
         'val_ratio': 0.1,
         'seed': 42,
         # 几何增强 (只作用于标签图, 信号同源派生)
@@ -87,6 +95,10 @@ cfg_default = AttrDict({
         'diverge_weight': 0.0,           # 顶端发散: 各线车前端点互相拉开
         'diverge_margin': 0.2,           # 顶端最小间距 (归一化)
 
+        # 关键点覆盖率 (默认权重 0; 见 exp4)
+        'keypoint_coverage_weight': 0.0,  # 覆盖损失权重
+        'keypoint_coverage_thr': 0.05,    # 覆盖阈值 (归一化): 关键点到最近预测点 <= thr 视为覆盖
+
         'lp_p': 4.0,                     # 线内 Lp 聚合指数 (>1 强调最差点/段, 1=均值)
     }),
 
@@ -110,6 +122,7 @@ exp1['num_epochs'] = 200
 exp1['map_det_head']['min_arc'] = 0.8
 exp1['work_dir'] = './work_dirs/exp1'
 
+# exp2: cost损失, 取消 interior_weight
 exp2 = deepcopy(cfg_default)
 exp2['map_det_head']['cost_weight'] = 1.0
 exp2['map_det_head']['interior_weight'] = 0.0
@@ -117,6 +130,7 @@ exp2['map_det_head']['min_arc'] = 0.8
 exp2['num_epochs'] = 200
 exp2['work_dir'] = './work_dirs/exp2'
 
+# exp3: 多线结构损失 (要求输出线共享车后起点)
 exp3 = deepcopy(cfg_default)
 exp3['map_det_head']['num_queries'] = 3
 exp3['map_det_head']['spread_weight'] = 0.0
@@ -125,11 +139,38 @@ exp3['map_det_head']['diverge_weight'] = 1.0
 exp3['map_det_head']['diverge_margin'] = 0.2
 exp3['work_dir'] = './work_dirs/exp3'
 
+# exp4: 关键点覆盖率损失 (要求输出线覆盖车前关键点)
+exp4 = deepcopy(cfg_default)
+exp4['map_det_head']['num_queries'] = 3
+exp4['map_det_head']['keypoint_coverage_weight'] = 2.0
+exp4['map_det_head']['keypoint_coverage_thr'] = 0.05
+exp4['map_det_head']['start_gather_weight'] = 1.0
+# exp4['map_det_head']['diverge_weight'] = 1.0
+# exp4['map_det_head']['diverge_margin'] = 0.2
+exp4['work_dir'] = './work_dirs/exp4'
+
+
+exp5 = deepcopy(exp4)
+exp5['num_epochs'] = 200
+exp5['map_det_head']['keypoint_coverage_weight'] = 5.0
+# exp5['data']['val_ratio'] = 0.1
+exp5['work_dir'] = './work_dirs/exp5'
+
+
+exp6 = deepcopy(exp5)
+exp6['map_det_head']['min_arc'] = 0.2
+exp6['map_det_head']['min_span'] = 0.2
+exp6['work_dir'] = './work_dirs/exp6'
+
+
 CONFIGS = {
     'default': cfg_default,
     'exp1': exp1,
     'exp2': exp2,
     'exp3': exp3,
+    'exp4': exp4,
+    'exp5': exp5,
+    'exp6': exp6,
 }
 
 cfg = cfg_default

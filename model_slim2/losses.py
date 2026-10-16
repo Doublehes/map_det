@@ -280,6 +280,55 @@ def diverge_loss(points: torch.Tensor, margin: float) -> torch.Tensor:
     return diverge_per_pair(points, margin).sum() / (B * N * (N - 1))
 
 
+# ─────────────────────────── 关键点覆盖率 ───────────────────────────
+
+def keypoint_dist_per_kp(points: torch.Tensor, kps: torch.Tensor) -> torch.Tensor:
+    """每个关键点到"全部预测点"的最近点距 (纯点到点)
+
+    points: (B, N, P, 2) 归一化 (u,v) 预测点
+    kps:    (B, K, 2) 归一化关键点 (补 0 占位由 valid 掩码过滤)
+    Returns: (B, K)  [b, k] = min_{n,p} ‖kp_k - p_{n,p}‖
+    """
+    B, N, P, _ = points.shape
+    pf = points.reshape(B, N * P, 2)                       # (B, N*P, 2)
+    d = (kps.unsqueeze(2) - pf.unsqueeze(1)).norm(dim=-1)  # (B, K, N*P)
+    return d.min(dim=-1)[0]                                # (B, K)
+
+
+def keypoint_coverage_per_kp(points: torch.Tensor, kps: torch.Tensor,
+                             thr: float = 0.05) -> torch.Tensor:
+    """未覆盖惩罚明细 (B, K) = relu(d - thr)
+
+    关键点到最近预测点距离 d <= thr 视为已覆盖 -> 0; 超出部分线性惩罚。
+    最小化它等价于把所有关键点拉进阈值内 (最大化覆盖率)。
+    """
+    return torch.relu(keypoint_dist_per_kp(points, kps) - thr)
+
+
+def keypoint_coverage_loss(points: torch.Tensor, kps: torch.Tensor, thr: float = 0.05,
+                           valid: torch.Tensor = None) -> torch.Tensor:
+    """关键点覆盖率损失 (标量): 有效关键点上 relu(d - thr) 的均值
+
+    valid: (B, K) 1=真实关键点, 0=补 0 占位; 仅对真实关键点求均值。
+    """
+    pen = keypoint_coverage_per_kp(points, kps, thr)       # (B, K)
+    if valid is None:
+        return pen.mean()
+    v = valid.float()
+    return (pen * v).sum() / v.sum().clamp_min(1.0)
+
+
+def keypoint_coverage_rate(points: torch.Tensor, kps: torch.Tensor, thr: float = 0.05,
+                           valid: torch.Tensor = None) -> torch.Tensor:
+    """覆盖率指标 (标量): 有效关键点中 d <= thr 的比例 (仅供监控, 不可导)"""
+    d = keypoint_dist_per_kp(points, kps)                  # (B, K)
+    covered = (d <= thr).float()
+    if valid is None:
+        return covered.mean()
+    v = valid.float()
+    return (covered * v).sum() / v.sum().clamp_min(1.0)
+
+
 def loss_shares(loss_dict: dict) -> dict:
     """各损失项占总损失的百分比 (所有项非负, 占比之和=1)
 

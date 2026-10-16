@@ -107,4 +107,5 @@ class Slim2Model(nn.Module):
 
     def compute_loss(self, cls_scores, reg_preds, batch):
         """自监督损失: 由 head 重写的 loss 计算"""
-        return self.head.loss(cls_scores, reg_preds, batch['cost'], batch['dist_field'])
+        return self.head.loss(cls_scores, reg_preds, batch['cost'], batch['dist_field'],
+                              batch.get('keypoints'), batch.get('keypoints_valid'))

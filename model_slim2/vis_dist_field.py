@@ -34,12 +34,22 @@ IGNORE_COLOR = (60, 60, 60)
 # ── 调试参数 (改这里即可, 或加命令行) ──
 MIN_ROAD_WIDTH_PX = 5      # 距离场: 路宽 < 该值 -> 不算路 (剔除)
 RIDGE_WINDOW_PX = 30        # 局部最大窗口半径, 应 >= 数据最大路半宽
+KEEP_MAIN = True           # 距离场: 只保留最大可通行连通域 (删掉其它小块可通行区)
+CC_CONNECTIVITY = 8        # 最大连通域用的连通性: 4 或 8
 
 # 骨架专用参数 (与距离场解耦)
 SKEL_MIN_WIDTH_PX = 6      # 骨架: 剔除宽度 < 该值的结构 (开运算, 去毛刺/细缝)
 SMOOTH_SIGMA = 2.0          # 骨架: 边界高斯平滑 sigma (px), 0=不平滑
 PRUNE_LEN = 50              # 毛刺枝长度阈值 (像素): 端点枝 < 该值则剪除
 FILL_MAX_AREA = 8           # 只填面积 <= 该值的封闭孔洞 (px); 更大的视为真口袋, 不填
+
+# 车前关键点 (从窗口场 win_f 局部极大提取, 仅车前 v<=VFRONT)
+KP_WIN = 2                  # 局部极大窗口半径 (px): field >= dilate(field, 2*win+1)
+KP_EPS = 0.02               # 平台容差 (字段单位[0,1]): 处理均匀宽度走廊的 field 平台
+KP_FIELD_FLOOR = 0.3        # 字段强度下限[0,1]: 丢弃太弱的枝
+KP_VFRONT = 0.7             # 只看车前: 保留 v <= 该值 (v=0 顶部=车前)
+KP_DMIN = 0.05              # 关键点最小间隔 (归一化): NMS 保证离散
+KP_MAX = 100                  # 最多关键点个数
 
 
 def load_mask(path: Path) -> np.ndarray:
@@ -76,12 +86,14 @@ def old_dist_field(fg: np.ndarray, max_dist_px: float) -> np.ndarray:
 
 
 def build_field(fg: np.ndarray, min_road_width_px: float = MIN_ROAD_WIDTH_PX,
-                ridge_window_px: float = RIDGE_WINDOW_PX):
-    """方案 A 新距离场。返回 (field, fg_opened, removed_mask)
+                ridge_window_px: float = RIDGE_WINDOW_PX,
+                keep_main: bool = KEEP_MAIN, connectivity: int = CC_CONNECTIVITY):
+    """方案 A 新距离场。返回 (field, fg_main, removed, removed_cc)
 
     field      : (H,W) float32, 中心=1 两边衰减, 非前景=0
-    fg_opened  : 开运算后的可通行 mask (去窄路)
-    removed    : 被剔除的像素 (原可通行 但 开运算后不属于前景)
+    fg_main    : 开运算 + 只保留最大连通域 后的可通行 mask (uint8)
+    removed    : 被开运算剔除的像素 (原可通行 但 开运算后不属于前景)
+    removed_cc : 被"只保留最大连通域"剔除的像素 (开了的其它小块)
     """
     # 1) 开运算剔除窄结构
     r = max(1, int(round(min_road_width_px / 2.0)))
@@ -89,8 +101,16 @@ def build_field(fg: np.ndarray, min_road_width_px: float = MIN_ROAD_WIDTH_PX,
     fg_open = cv2.morphologyEx(fg, cv2.MORPH_OPEN, ell)
     removed = ((fg == 1) & (fg_open == 0))
 
-    # 2) 到边界距离
-    dist = cv2.distanceTransform(fg_open, cv2.DIST_L2, 5)
+    # 1b) 只保留最大可通行连通域, 删掉其它小块
+    if keep_main:
+        fg_main_b = _largest_cc(fg_open, connectivity)
+    else:
+        fg_main_b = fg_open > 0
+    removed_cc = (fg_open > 0) & (~fg_main_b)
+    fg_main = fg_main_b.astype(np.uint8)
+
+    # 2) 到边界距离 (只在最大连通域内)
+    dist = cv2.distanceTransform(fg_main, cv2.DIST_L2, 5)
 
     # 3) 局部最大 = 脊线高度 (灰度膨胀 = 最大滤波)
     R = max(1, int(round(ridge_window_px)))
@@ -100,8 +120,8 @@ def build_field(fg: np.ndarray, min_road_width_px: float = MIN_ROAD_WIDTH_PX,
 
     # 4) 按局部半宽归一化: 中心=1, 宽慢窄快, 无平台
     field = np.clip(dist / local_max, 0.0, 1.0).astype(np.float32)
-    field[fg_open == 0] = 0.0
-    return field, fg_open, removed
+    field[fg_main == 0] = 0.0
+    return field, fg_main, removed, removed_cc
 
 
 def to_vis(field: np.ndarray, cmap) -> np.ndarray:
@@ -341,14 +361,56 @@ def render_profile(old_row: np.ndarray, win_row: np.ndarray, scan_row: int,
     return canvas
 
 
-def render(mask, old_f, win_f, skel, longest, removed, fg, token, min_w, win_r, scan_row):
+def extract_keypoints_lm(field: np.ndarray, win: float = KP_WIN, eps: float = KP_EPS,
+                         field_floor: float = KP_FIELD_FLOOR, v_front: float = KP_VFRONT,
+                         d_min: float = KP_DMIN, max_pts: int = KP_MAX):
+    """从窗口场提取"车前关键点": 局部极大 + 强度下限 + 只看车前 + 间隔NMS
+
+    field: 归一化窗口场 (build_field 的返回值, 值域[0,1]; 前景 = field > 0)
+    返回 (keypoints, candidates):
+      keypoints  : [(u, v, field), ...] 按 u 排序(左->右), 最多 max_pts 个
+      candidates : [(u, v, field), ...] 车前全部局部极大候选(未 NMS)
+    """
+    H, W = field.shape
+    if field.sum() == 0:
+        return [], []
+    r = max(1, int(win))
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    mx = cv2.dilate(field, kern)
+    cand_mask = (field >= mx - eps) & (field > 0)       # 局部极大(含平台)
+    ys, xs = np.where(cand_mask)
+    cands = []
+    for y, x in zip(ys.tolist(), xs.tolist()):
+        dv = float(field[y, x])
+        if dv < field_floor:
+            continue
+        u = x / (W - 1)
+        v = y / (H - 1)
+        if v > v_front:                                 # 只看车前 (v=0 顶部=车前)
+            continue
+        cands.append((u, v, dv))
+
+    cands.sort(key=lambda t: -t[2])                     # 按脊线强度降序
+    kept = []
+    for (u, v, dv) in cands:                            # 间隔 NMS
+        if all((u - ku) ** 2 + (v - kv) ** 2 >= d_min * d_min for (ku, kv, _) in kept):
+            kept.append((u, v, dv))
+            if len(kept) >= max_pts:
+                break
+    kept.sort(key=lambda t: t[0])                       # 按 u 左->右
+    return kept, cands
+
+
+def render(mask, old_f, win_f, skel, longest, removed, removed_cc, fg, token, min_w, win_r, scan_row,
+           kp_pts=None, kp_cands=None, v_front=KP_VFRONT):
     seg = colorize_mask(mask, 255)
     old_vis = to_vis(old_f, cv2.COLORMAP_VIRIDIS)
     win_vis = to_vis(win_f, cv2.COLORMAP_VIRIDIS)
 
-    # 窗口法场 + 移除区域高亮(红)
+    # 窗口法场 + 移除区域高亮: 红=开运算移除, 洋红=非最大连通域移除
     win_hl = win_vis.copy()
     win_hl[removed] = (0, 0, 255)
+    win_hl[removed_cc] = (255, 0, 255)
 
     # 骨架面板: 分割压暗为底 + 绿=完整骨架 + 红=最长路径
     k3 = np.ones((3, 3), np.uint8)
@@ -358,8 +420,26 @@ def render(mask, old_f, win_f, skel, longest, removed, fg, token, min_w, win_r, 
     skel_vis[skel_d] = (0, 255, 0)
     skel_vis[long_d] = (0, 0, 255)
 
+    # 车前关键点面板: 分割压暗为底 + 暗点=候选局部极大 + 亮点=入选关键点
+    kp_vis = (seg * 0.5).astype(np.uint8)
+    vf_row = int(round(v_front * (kp_vis.shape[0] - 1)))
+    cv2.line(kp_vis, (0, vf_row), (kp_vis.shape[1] - 1, vf_row), (0, 200, 200), 1, cv2.LINE_AA)
+    for (u, v, dv) in (kp_cands or []):
+        cx = int(round(u * (kp_vis.shape[1] - 1)))
+        cy = int(round(v * (kp_vis.shape[0] - 1)))
+        cv2.circle(kp_vis, (cx, cy), 1, (90, 160, 90), -1, cv2.LINE_AA)
+    for i, (u, v, dv) in enumerate(kp_pts or []):
+        cx = int(round(u * (kp_vis.shape[1] - 1)))
+        cy = int(round(v * (kp_vis.shape[0] - 1)))
+        rad = 3
+        cv2.circle(kp_vis, (cx, cy), rad, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(kp_vis, str(i), (cx + rad + 1, cy + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
+
     panels = [('seg', seg), ('old dist', old_vis), ('window field', win_vis),
-              ('window + removed', win_hl), ('skeleton  all=green  longest=red', skel_vis)]
+              ('removed  red=open  magenta=CC', win_hl),
+              ('skeleton  all=green  longest=red', skel_vis),
+              ('keypoints  front local-max + NMS', kp_vis)]
     # 扫描行标记 (只画在3个场面板上, 不含 seg 与 skeleton)
     for _, p in panels[1:4]:
         cv2.line(p, (0, scan_row), (p.shape[1] - 1, scan_row), (255, 255, 255), 1, cv2.LINE_AA)
@@ -376,7 +456,8 @@ def render(mask, old_f, win_f, skel, longest, removed, fg, token, min_w, win_r, 
 
     header = np.full((30, body.shape[1], 3), 30, np.uint8)
     cv2.putText(header, f'token={token}  min_width={min_w}px  window={win_r}px  '
-                        f'removed={100.0 * removed.mean():.1f}%  scan_row={scan_row}',
+                        f'removed={100.0 * removed.mean():.1f}%  '
+                        f'cc_removed={100.0 * removed_cc.mean():.1f}%  scan_row={scan_row}',
                 (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
     return np.concatenate([header, body], axis=0)
 
@@ -395,14 +476,26 @@ def main():
     parser.add_argument('--start', type=int, default=0)
     parser.add_argument('--min-width', type=float, default=MIN_ROAD_WIDTH_PX)
     parser.add_argument('--window', type=float, default=RIDGE_WINDOW_PX)
+    parser.add_argument('--no-keep-main', dest='keep_main', action='store_false',
+                        default=KEEP_MAIN, help='关闭"只保留最大可通行连通域"')
+    parser.add_argument('--cc-connectivity', type=int, default=CC_CONNECTIVITY,
+                        choices=(4, 8), help='最大连通域连通性')
     parser.add_argument('--skel-min-width', type=float, default=SKEL_MIN_WIDTH_PX)
     parser.add_argument('--smooth', type=float, default=SMOOTH_SIGMA)
     parser.add_argument('--prune', type=int, default=PRUNE_LEN)
     parser.add_argument('--fill-max-area', type=int, default=FILL_MAX_AREA)
+    parser.add_argument('--kp-win', type=float, default=KP_WIN)
+    parser.add_argument('--kp-dmin', type=float, default=KP_DMIN)
+    parser.add_argument('--kp-max', type=int, default=KP_MAX)
+    parser.add_argument('--kp-field-floor', type=float, default=KP_FIELD_FLOOR)
+    parser.add_argument('--kp-vfront', type=float, default=KP_VFRONT)
     args = parser.parse_args()
     min_w, win_r = args.min_width, args.window
+    keep_main, cc_conn = args.keep_main, args.cc_connectivity
     skel_w, smooth_sigma, prune_len = args.skel_min_width, args.smooth, args.prune
     fill_max_area = args.fill_max_area
+    kp = dict(win=args.kp_win, d_min=args.kp_dmin, max_pts=args.kp_max,
+              field_floor=args.kp_field_floor, v_front=args.kp_vfront)
 
     cfg = cfg_module.CONFIGS[args.config]
     seg_dir = Path(cfg.data.seg_dir)
@@ -413,7 +506,8 @@ def main():
     files = sorted([p for p in seg_dir.iterdir() if p.suffix.lower() == '.png'],
                    key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem)
     print(f'[vis_dist_field] {len(files)} 张, drivable={drivable}, max_dist_px={max_dist_px}')
-    print(f'  参数: min_road_width={min_w}px, ridge_window={win_r}px  |  '
+    print(f'  参数: min_road_width={min_w}px, ridge_window={win_r}px, '
+          f'keep_main={keep_main}(conn={cc_conn})  |  '
           f'skel_min_width={skel_w}px, smooth={smooth_sigma}, prune={prune_len}px')
 
     win, win_prof = 'dist_field', 'profile'
@@ -430,24 +524,30 @@ def main():
         mask = load_mask(path)
         fg = drivable_binary(mask, drivable, ignore_index)
         old_f = old_dist_field(fg, max_dist_px)
-        win_f, fg_open, removed = build_field(fg, min_w, win_r)
+        win_f, fg_main, removed, removed_cc = build_field(fg, min_w, win_r, keep_main, cc_conn)
         skel, longest, sk = build_skeleton(fg, skel_w, smooth_sigma, prune_len, True, fill_max_area)
+        kp_pts, kp_cands = extract_keypoints_lm(win_f, **kp)
         print(f'[样本 {i}] token={path.stem}  removed={100.0 * removed.mean():.1f}%  '
+              f'cc_removed={100.0 * removed_cc.mean():.1f}%  keep_main={keep_main} conn={cc_conn}  '
               f'old: max={old_f.max():.2f} plateau={100.0 * (old_f >= 0.999).mean():.1f}%  '
               f'win: max={win_f.max():.2f}  |  skel: pix={sk["pix"]}->{sk["pix_pruned"]} '
               f'end={sk["endpoints"]} junc={sk["junctions"]} comps={sk["comps"]} '
               f'longest={sk["longest"]}px')
-        return dict(mask=mask, fg=fg, old_f=old_f, win_f=win_f, skel=skel, longest=longest,
-                    removed=removed, token=path.stem, h=win_f.shape[0])
+        print(f'    车前关键点: 候选={len(kp_cands)} 入选={len(kp_pts)}  '
+               + ' '.join(f'({u:.2f},{v:.2f},f={d:.2f})' for (u, v, d) in kp_pts))
+        return dict(mask=mask, fg=fg, fg_main=fg_main, old_f=old_f, win_f=win_f, skel=skel, longest=longest,
+                    removed=removed, removed_cc=removed_cc, kp_pts=kp_pts, kp_cands=kp_cands,
+                    token=path.stem, h=win_f.shape[0])
 
     def show(s):
         cv2.imshow(win, render(s['mask'], s['old_f'], s['win_f'], s['skel'], s['longest'],
-                               s['removed'], s['fg'], s['token'], min_w, win_r, scan_row))
+                               s['removed'], s['removed_cc'], s['fg'], s['token'], min_w, win_r, scan_row,
+                               s['kp_pts'], s['kp_cands'], kp['v_front']))
         cv2.imshow(win_prof, render_profile(s['old_f'][scan_row], s['win_f'][scan_row], scan_row))
 
     idx = args.start % len(files)
     s = load(idx)
-    scan_row = profile_row(s['win_f'], s['fg'])
+    scan_row = profile_row(s['win_f'], s['fg_main'])
 
     while True:
         show(s)
@@ -461,11 +561,11 @@ def main():
         elif key in LEFT_KEYS or key == ord('a'):
             idx = (idx - 1) % len(files)
             s = load(idx)
-            scan_row = profile_row(s['win_f'], s['fg'])
+            scan_row = profile_row(s['win_f'], s['fg_main'])
         elif key in RIGHT_KEYS or key in (ord('d'), ord(' ')):
             idx = (idx + 1) % len(files)
             s = load(idx)
-            scan_row = profile_row(s['win_f'], s['fg'])
+            scan_row = profile_row(s['win_f'], s['fg_main'])
         # 其它键: 忽略, 重绘当前帧
 
     cv2.destroyAllWindows()
