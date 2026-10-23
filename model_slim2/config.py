@@ -158,9 +158,18 @@ exp5['work_dir'] = './work_dirs/exp5'
 
 
 exp6 = deepcopy(exp5)
+exp6['map_det_head']['cost_weight'] = 1.0
+exp6['map_det_head']['interior_weight'] = 0.0
 exp6['map_det_head']['min_arc'] = 0.2
 exp6['map_det_head']['min_span'] = 0.2
 exp6['work_dir'] = './work_dirs/exp6'
+
+
+# exp7: 3 层 decoder, 每层都回传 loss (权重 0.5 / 0.5 / 1.0), 共享 reg head
+exp7 = deepcopy(exp5)
+exp7['map_det_head']['num_decoder_layers'] = 3
+exp7['map_det_head']['decoder_layer_loss_weights'] = [0.5, 0.5, 1.0]
+exp7['work_dir'] = './work_dirs/exp7'
 
 
 CONFIGS = {
@@ -171,6 +180,7 @@ CONFIGS = {
     'exp4': exp4,
     'exp5': exp5,
     'exp6': exp6,
+    'exp7': exp7,
 }
 
 cfg = cfg_default

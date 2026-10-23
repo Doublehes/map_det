@@ -186,7 +186,7 @@ def main():
         t0 = time.time()
         for batch_idx, batch in enumerate(train_loader):
             inp = batch['input'].to(cfg.device)
-            cls_scores, reg_preds = model(inp)
+            cls_scores, reg_preds = model(inp, return_all_layers=True)
             loss_dict = model.compute_loss(cls_scores, reg_preds, batch)
             loss = loss_dict['total']
 
@@ -207,11 +207,20 @@ def main():
                 writer.add_scalar(f'share/{k}', v, global_step)
             writer.add_scalar('lr', optimizer.param_groups[0]['lr'], global_step)
 
+            # 多层 decoder: 逐层加权损失 (不参与 total/share, 仅监控)
+            layer_losses = model.head.last_layer_losses
+            if layer_losses is not None:
+                for i, lv in enumerate(layer_losses):
+                    writer.add_scalar(f'loss/layer{i}', lv.item(), global_step)
+
             if batch_idx % cfg.log_interval == 0:
                 items = ' '.join(f'{k}={v.item():.3f}' for k, v in loss_dict.items())
                 share_str = ' '.join(f'{k}={100 * v:.0f}%' for k, v in shares.items())
                 print(f'[E {epoch + 1}/{cfg.num_epochs}] [{batch_idx}/{len(train_loader)}] {items}')
                 print(f'    share: {share_str}')
+                if layer_losses is not None:
+                    print('    layer: ' + ' '.join(
+                        f'L{i}={lv.item():.3f}' for i, lv in enumerate(layer_losses)))
 
         avg_loss = total_loss / max(len(train_loader), 1)
         print(f'[Epoch {epoch + 1}] 平均 loss={avg_loss:.4f} 耗时={time.time() - t0:.0f}s')

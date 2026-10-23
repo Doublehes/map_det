@@ -64,6 +64,8 @@ class Slim2Head(MapTRHead):
         self.diverge_margin = cfg.get('diverge_margin', 0.2)
         self.w_kp_coverage = cfg.get('keypoint_coverage_weight', 0.0)
         self.kp_coverage_thr = cfg.get('keypoint_coverage_thr', 0.05)
+        self.decoder_layer_loss_weights = cfg.get('decoder_layer_loss_weights', None)
+        self.last_layer_losses = None
         self.lp_p = cfg.get('lp_p', 4.0)
 
     def init_weights(self):
@@ -104,56 +106,15 @@ class Slim2Head(MapTRHead):
                 branch[-1].weight.zero_()
                 branch[-1].bias.copy_(ctr_logit)
 
-    def loss(self, cls_scores, reg_preds, cost, dist_field,
-             keypoints=None, keypoints_valid=None):
-        """自监督损失: 采样代价图/距离场 + 正则
-
-        cls_scores: (B, N, num_classes) logits (自监督下不参与损失)
-        reg_preds:  (B, N, num_points, 2) 归一化 (u,v)
-        cost:       (B, 1, H, W) 代价图 [0,1]
-        dist_field: (B, 1, H, W) 可通行区距离场 [0,1]
-        keypoints:  (B, K, 2) 归一化关键点 (可为 None; 补 0 占位由 keypoints_valid 过滤)
-        keypoints_valid: (B, K) 1=真实关键点, 0=占位
-        Returns: loss dict (含 'total')
-        """
-        device = reg_preds.device
-        cost = cost.to(device)
-        dist_field = dist_field.to(device)
-
-        # ───────────────────────── 自监督损失说明 ─────────────────────────
-        # 核心思路: 无线 GT, 用"代价图 + 距离场"作为信号, 把预测线放到可通行区域中心
-        # 并保持合理几何形状。所有项均 >=0, 越大越差; 线内逐点/逐段聚合用 Lp(放大难点)。
-        #
-        # 正确信号 (贴可通行区/脊线):
-        #   l_cost    : Lp(采样代价图) ↓          → 点落在低代价(可通行)区
-        #   l_interior: Lp(1 - 采样距离场) ↓      → 线居中于可通行区(脊线), 关键"中心线"信号
-        # 形状正则 (无线 GT, 只看几何):
-        #   l_smooth  : Lp(1-cos相邻段夹角) + Lp(relu(最小步长-段长)) ↓
-        #               → 转向惩罚(防打结/回折) + 最小步长(防点挤堆)
-        #   l_spacing : Lp(段长相对偏差 |s-mean(s)|/mean(s)) ↓ → 各段等距(尺度无关)
-        #   l_arc     : relu(min_arc - 弧长Σ‖Δp‖) ↓ → 弧长(真实长度)下界
-        #   l_span    : relu(min_span - ‖p_last - p_first‖) ↓ → 端点距下界, 逼线张开成条
-        #               (弧长可被原地振荡伪造, 端点距不能; 二者互补)
-        # 多线结构 (N>1 时生效, 默认权重 0, 见 exp3):
-        #   l_start_gather: mean_{i<j}‖p0_i - p0_j‖ ↓ → 低端聚合, 各线共享车后起点
-        #   l_diverge     : mean_{i<j}relu(margin - ‖p_last_i - p_last_j‖) ↓
-        #                   → 顶端发散, 各线车前端点互相拉开(不同岔路)
-        # 关键点覆盖率 (默认权重 0, 见 exp4):
-        #   l_keypoint_coverage: mean_k relu(d_k - thr) ↓
-        #                   d_k = 关键点 k 到所有预测点(全部线×全部点)的最近点距;
-        #                   d_k<=thr 视为已覆盖(不罚), 最小化它=最大化覆盖率
-        # 已关闭 (默认权重置 0):
-        #   l_repel / l_spread
-        # 注: 用 loss_shares 看各项占总损失比例(解决量纲/正负不可比), 辅助权重平衡。
-        # ──────────────────────────────────────────────────────────────────
-        img_hw = cost.shape[-2:]
+    def _single_layer_terms(self, reg_preds, cost, dist_field,
+                            keypoints, kp_valid, img_hw):
+        """单层自监督损失各项 (不含 total)。全部 >=0, 越大越差。"""
         if keypoints is not None:
-            kp_valid = None if keypoints_valid is None else keypoints_valid.to(device)
             l_kp_coverage = self.w_kp_coverage * keypoint_coverage_loss(
-                reg_preds, keypoints.to(device), self.kp_coverage_thr, kp_valid)
+                reg_preds, keypoints, self.kp_coverage_thr, kp_valid)
         else:
             l_kp_coverage = reg_preds.new_zeros(())
-        loss_dict = {
+        return {
             'cost': self.w_cost * cost_loss(cost, reg_preds, self.lp_p),
             'interior': self.w_interior * interior_loss(dist_field, reg_preds, self.lp_p),
             'smooth': self.w_smooth * smooth_loss(reg_preds, img_hw, self.smooth_min_step_px, self.lp_p),
@@ -166,6 +127,71 @@ class Slim2Head(MapTRHead):
             'diverge': self.w_diverge * diverge_loss(reg_preds, self.diverge_margin),
             'keypoint_coverage': l_kp_coverage,
         }
+
+    def loss(self, cls_scores, reg_preds, cost, dist_field,
+             keypoints=None, keypoints_valid=None):
+        """自监督损失: 采样代价图/距离场 + 正则 (支持多层 decoder)
+
+        cls_scores: 自监督下不参与损失 (单层或多层 list 均可)
+        reg_preds:  (B, N, num_points, 2) 或 list[每层一个 (B, N, num_points, 2)]
+        cost:       (B, 1, H, W) 代价图 [0,1]
+        dist_field: (B, 1, H, W) 可通行区距离场 [0,1]
+        keypoints:  (B, K, 2) 归一化关键点 (可为 None; 补 0 占位由 keypoints_valid 过滤)
+        keypoints_valid: (B, K) 1=真实关键点, 0=占位
+        Returns: loss dict (含 'total')
+
+        多层时按 `decoder_layer_loss_weights` (缺省全 1) 加权: 各项聚合到同名键,
+        因此 loss_shares / 训练日志键名不变; 各层加权损失存于 self.last_layer_losses。
+        """
+        is_multi = isinstance(reg_preds, (list, tuple))
+        device = (reg_preds[0] if is_multi else reg_preds).device
+        cost = cost.to(device)
+        dist_field = dist_field.to(device)
+        kp = None if keypoints is None else keypoints.to(device)
+        kp_valid = None if keypoints_valid is None else keypoints_valid.to(device)
+        img_hw = cost.shape[-2:]
+
+        # ───────────────────────── 自监督损失说明 ─────────────────────────
+        # 核心思路: 无线 GT, 用"代价图 + 距离场"作为信号, 把预测线放到可通行区域中心
+        # 并保持合理几何形状。所有项均 >=0, 越大越差; 线内逐点/逐段聚合用 Lp(放大难点)。
+        #
+        # 正确信号 (贴可通行区/脊线):
+        #   l_cost    : Lp(采样代价图) ↓          → 点落在低代价(可通行)区
+        #   l_interior: Lp(1 - 采样距离场) ↓      → 线居中于可通行区(脊线), 关键"中心线"信号
+        # 形状正则 (无线 GT, 只看几何):
+        #   l_smooth  : Lp(1-cos相邻段夹角) + Lp(relu(最小步长-段长)) ↓
+        #   l_spacing : Lp(段长相对偏差 |s-mean(s)|/mean(s)) ↓ → 各段等距(尺度无关)
+        #   l_arc     : relu(min_arc - 弧长Σ‖Δp‖) ↓ → 弧长(真实长度)下界
+        #   l_span    : relu(min_span - ‖p_last - p_first‖) ↓ → 端点距下界, 逼线张开成条
+        # 多线结构 (N>1, 默认权重 0, 见 exp3):
+        #   l_start_gather / l_diverge
+        # 关键点覆盖率 (默认权重 0, 见 exp4):
+        #   l_keypoint_coverage: mean_k relu(d_k - thr) ↓, d_k=关键点 k 到所有预测点最近点距
+        # 已关闭 (默认权重置 0): l_repel / l_spread
+        # 多层: loss_dict[k] = Σ_l w_l·term_l[k]; total = Σ_l w_l·L_l (见 exp7)
+        # 注: 用 loss_shares 看各项占总损失比例, 辅助权重平衡。
+        # ──────────────────────────────────────────────────────────────────
+        if is_multi:
+            L = len(reg_preds)
+            weights = self.decoder_layer_loss_weights
+            if weights is None:
+                weights = [1.0] * L
+            assert len(weights) == L, \
+                f'decoder_layer_loss_weights 长度 {len(weights)} != decoder 层数 {L}'
+            per_layer = [self._single_layer_terms(rp, cost, dist_field, kp, kp_valid, img_hw)
+                         for rp in reg_preds]
+            keys = list(per_layer[0].keys())
+            loss_dict = {
+                k: sum(w * terms[k] for w, terms in zip(weights, per_layer))
+                for k in keys
+            }
+            self.last_layer_losses = [
+                w * sum(terms.values()) for w, terms in zip(weights, per_layer)
+            ]
+        else:
+            loss_dict = self._single_layer_terms(reg_preds, cost, dist_field, kp, kp_valid, img_hw)
+            self.last_layer_losses = None
+
         loss_dict['total'] = sum(loss_dict.values())
         return loss_dict
 
@@ -177,6 +203,8 @@ class Slim2Head(MapTRHead):
             per-pair  (B, N, N): repel / spread (对角为 0)
             per-kp    (B, K): keypoint_coverage (仅当提供 keypoints 时)
         """
+        if isinstance(reg_preds, (list, tuple)):     # 多层时只看最后一层
+            reg_preds = reg_preds[-1]
         device = reg_preds.device
         cost = cost.to(device)
         dist_field = dist_field.to(device)
