@@ -1,14 +1,12 @@
 """model_slim2 距离场调试脚本 (独立, 不接入模型)
 
-目标: 对比"现有距离场"与"新距离场(方案A)"的效果, 交互式查看, 调好再进模型。
+目标: 调试新距离场(方案A), 交互式查看, 调好再进模型。
 
 新距离场 (方案 A: 按局部路半宽归一化):
     1) 形态学开运算剔除 < min_road_width_px 的窄结构(含附着细支)
     2) dist = 到边界距离变换
     3) local_max = 局部最大(灰度膨胀) ≈ 该处脊线高度(= 局部路半宽)
     4) field = clip(dist / local_max, 0, 1)  -> 中心恒为 1, 宽路衰减慢/窄路衰减快, 无平台
-
-现有距离场 (对照): field = clip(dist / dist_max_px, 0, 1), 非可通行区 = 0
 
 运行:
     conda run -n deeptouchpro python model_slim2/vis_dist_field.py
@@ -75,14 +73,6 @@ def drivable_binary(mask: np.ndarray, drivable_classes, ignore_index: int) -> np
         fg[mask == c] = 1
     fg[mask == ignore_index] = 0
     return fg
-
-
-def old_dist_field(fg: np.ndarray, max_dist_px: float) -> np.ndarray:
-    """现有实现 (对照): clip(dist/max_dist_px, 0, 1), 非可通行区 = 0"""
-    dist = cv2.distanceTransform(fg, cv2.DIST_L2, 5)
-    out = np.clip(dist / max(max_dist_px, 1e-6), 0.0, 1.0).astype(np.float32)
-    out[fg == 0] = 0.0
-    return out
 
 
 def build_field(fg: np.ndarray, min_road_width_px: float = MIN_ROAD_WIDTH_PX,
@@ -308,11 +298,11 @@ def longest_path(skel: np.ndarray) -> np.ndarray:
     return mask
 
 
-def render_profile(old_row: np.ndarray, win_row: np.ndarray, scan_row: int,
+def render_profile(win_row: np.ndarray, scan_row: int,
                    w: int = 560, h: int = 280) -> np.ndarray:
-    """把某一行的 旧场 / 窗口法 字段值画成曲线图 (cv2 手绘, 不依赖 matplotlib)
+    """把某一行的窗口法字段值画成曲线图 (cv2 手绘, 不依赖 matplotlib)
 
-    x 轴: 图像列 u; y 轴: 场值 0~1。蓝=旧场(old dist), 绿=窗口法新场(window)。
+    x 轴: 图像列 u; y 轴: 场值 0~1。绿=窗口法新场(window)。
     """
     canvas = np.full((h, w, 3), 30, dtype=np.uint8)
     x0, x1 = 64, w - 16
@@ -339,7 +329,6 @@ def render_profile(old_row: np.ndarray, win_row: np.ndarray, scan_row: int,
         for i in range(n - 1):
             cv2.line(canvas, (int(xs[i]), int(ys[i])), (int(xs[i + 1]), int(ys[i + 1])), color, 2, cv2.LINE_AA)
 
-    draw(old_row, (255, 128, 0))    # 旧场   BGR 蓝
     draw(win_row, (0, 255, 0))      # 窗口法 BGR 绿
 
     # 标题 + 轴标签
@@ -351,12 +340,9 @@ def render_profile(old_row: np.ndarray, win_row: np.ndarray, scan_row: int,
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (185, 185, 185), 1, cv2.LINE_AA)
 
     # 图例 (右上: 色块 + 文字)
-    lx, ly = x1 - 150, 46
-    cv2.line(canvas, (lx, ly), (lx + 26, ly), (255, 128, 0), 2, cv2.LINE_AA)
-    cv2.putText(canvas, 'old dist', (lx + 32, ly + 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 230, 230), 1, cv2.LINE_AA)
-    cv2.line(canvas, (lx, ly + 20), (lx + 26, ly + 20), (0, 255, 0), 2, cv2.LINE_AA)
-    cv2.putText(canvas, 'window', (lx + 32, ly + 24),
+    lx, ly = x1 - 100, 46
+    cv2.line(canvas, (lx, ly), (lx + 26, ly), (0, 255, 0), 2, cv2.LINE_AA)
+    cv2.putText(canvas, 'window', (lx + 32, ly + 4),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 230, 230), 1, cv2.LINE_AA)
     return canvas
 
@@ -401,10 +387,9 @@ def extract_keypoints_lm(field: np.ndarray, win: float = KP_WIN, eps: float = KP
     return kept, cands
 
 
-def render(mask, old_f, win_f, skel, longest, removed, removed_cc, fg, token, min_w, win_r, scan_row,
+def render(mask, win_f, skel, longest, removed, removed_cc, token, min_w, win_r, scan_row,
            kp_pts=None, kp_cands=None, v_front=KP_VFRONT):
     seg = colorize_mask(mask, 255)
-    old_vis = to_vis(old_f, cv2.COLORMAP_VIRIDIS)
     win_vis = to_vis(win_f, cv2.COLORMAP_VIRIDIS)
 
     # 窗口法场 + 移除区域高亮: 红=开运算移除, 洋红=非最大连通域移除
@@ -436,12 +421,12 @@ def render(mask, old_f, win_f, skel, longest, removed, removed_cc, fg, token, mi
         cv2.putText(kp_vis, str(i), (cx + rad + 1, cy + 4),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1, cv2.LINE_AA)
 
-    panels = [('seg', seg), ('old dist', old_vis), ('window field', win_vis),
+    panels = [('seg', seg), ('window field', win_vis),
               ('removed  red=open  magenta=CC', win_hl),
               ('skeleton  all=green  longest=red', skel_vis),
               ('keypoints  front local-max + NMS', kp_vis)]
-    # 扫描行标记 (只画在3个场面板上, 不含 seg 与 skeleton)
-    for _, p in panels[1:4]:
+    # 扫描行标记 (只画在2个场面板上, 不含 seg 与 skeleton)
+    for _, p in panels[1:3]:
         cv2.line(p, (0, scan_row), (p.shape[1] - 1, scan_row), (255, 255, 255), 1, cv2.LINE_AA)
     for name, p in panels:
         cv2.putText(p, name, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
@@ -504,13 +489,12 @@ def main():
     dirs = [Path(d) for d in data_dir] if isinstance(data_dir, (list, tuple)) else [Path(data_dir)]
     ignore_index = cfg.data.ignore_index
     drivable = tuple(cfg.data.drivable_classes)
-    max_dist_px = cfg.data.get('dist_max_px', 10.0)
 
     files = []
     for d in dirs:
         files.extend(sorted([p for p in d.iterdir() if p.suffix.lower() == '.png'],
                            key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem))
-    print(f'[vis_dist_field] {len(files)} 张, drivable={drivable}, max_dist_px={max_dist_px}')
+    print(f'[vis_dist_field] {len(files)} 张, drivable={drivable}')
     print(f'  参数: min_road_width={min_w}px, ridge_window={win_r}px, '
           f'keep_main={keep_main}(conn={cc_conn})  |  '
           f'skel_min_width={skel_w}px, smooth={smooth_sigma}, prune={prune_len}px')
@@ -528,27 +512,25 @@ def main():
         path = files[i]
         mask = load_mask(path)
         fg = drivable_binary(mask, drivable, ignore_index)
-        old_f = old_dist_field(fg, max_dist_px)
         win_f, fg_main, removed, removed_cc = build_field(fg, min_w, win_r, keep_main, cc_conn)
         skel, longest, sk = build_skeleton(fg, skel_w, smooth_sigma, prune_len, True, fill_max_area)
         kp_pts, kp_cands = extract_keypoints_lm(win_f, **kp)
         print(f'[样本 {i}] token={path.stem}  removed={100.0 * removed.mean():.1f}%  '
               f'cc_removed={100.0 * removed_cc.mean():.1f}%  keep_main={keep_main} conn={cc_conn}  '
-              f'old: max={old_f.max():.2f} plateau={100.0 * (old_f >= 0.999).mean():.1f}%  '
               f'win: max={win_f.max():.2f}  |  skel: pix={sk["pix"]}->{sk["pix_pruned"]} '
               f'end={sk["endpoints"]} junc={sk["junctions"]} comps={sk["comps"]} '
               f'longest={sk["longest"]}px')
         print(f'    车前关键点: 候选={len(kp_cands)} 入选={len(kp_pts)}  '
                + ' '.join(f'({u:.2f},{v:.2f},f={d:.2f})' for (u, v, d) in kp_pts))
-        return dict(mask=mask, fg=fg, fg_main=fg_main, old_f=old_f, win_f=win_f, skel=skel, longest=longest,
+        return dict(mask=mask, fg_main=fg_main, win_f=win_f, skel=skel, longest=longest,
                     removed=removed, removed_cc=removed_cc, kp_pts=kp_pts, kp_cands=kp_cands,
                     token=path.stem, h=win_f.shape[0])
 
     def show(s):
-        cv2.imshow(win, render(s['mask'], s['old_f'], s['win_f'], s['skel'], s['longest'],
-                               s['removed'], s['removed_cc'], s['fg'], s['token'], min_w, win_r, scan_row,
+        cv2.imshow(win, render(s['mask'], s['win_f'], s['skel'], s['longest'],
+                               s['removed'], s['removed_cc'], s['token'], min_w, win_r, scan_row,
                                s['kp_pts'], s['kp_cands'], kp['v_front']))
-        cv2.imshow(win_prof, render_profile(s['old_f'][scan_row], s['win_f'][scan_row], scan_row))
+        cv2.imshow(win_prof, render_profile(s['win_f'][scan_row], scan_row))
 
     idx = args.start % len(files)
     s = load(idx)

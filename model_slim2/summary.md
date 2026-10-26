@@ -246,8 +246,8 @@ repel_weight=0.0, spread_weight=0.0
 - **新场（方案A，窗口归一化）**：开运算(去 < `min_road_width` 的窄结构) → `dist=距离变换`
   → `local_max=灰度膨胀(dist, ridge_window)` → `field=clip(dist/local_max,0,1)`。
   性质：中心恒=1、宽路衰减慢/窄路快、无平台；非可通行=0。
-- **独立脚本 `model_slim2/vis_dist_field.py`**（不接模型）：面板 `seg | old dist | window field | window+removed`
-  + 扫描行剖面图；交互 `↑/↓(w/s)` 移动扫描行、`←/A →/D/空格` 切帧、`ESC/Q` 退出。
+- **独立脚本 `model_slim2/vis_dist_field.py`**（不接模型）：面板 `seg | window field | removed | skeleton | keypoints`
+  + 扫描行剖面图（仅窗口场曲线）；交互 `↑/↓(w/s)` 移动扫描行、`←/A →/D/空格` 切帧、`ESC/Q` 退出。
 - 试过“最大内切圆(disk)”方案（解决宽窄交界污染）→ **效果不明显，仅删除磁盘法**，保留窗口法。
 
 ### 11.2 骨架提取（scikit-image）
@@ -262,8 +262,8 @@ repel_weight=0.0, spread_weight=0.0
 
 ### 11.3 距离场移植进训练
 - `dataset.py` 新增 `mask_to_dist_field_norm(...)`（**独立实现**，与 `vis_dist_field.build_field` 逐位一致，
-  实测最大差=0）；**保留**原 `mask_to_dist_field`（`dist_field_mode='old'` 仍可用）。
-- `config.data` 新增：`dist_field_mode='new'`（默认）、`dist_min_road_width=5.0`、`dist_ridge_window=30.0`。
+  实测最大差=0）。原 `mask_to_dist_field` / `dist_field_mode='old'` 已于 §12.6 移除。
+- `config.data` 新增：`dist_min_road_width=5.0`、`dist_ridge_window=30.0`。
 
 ### 11.4 初始化方向改为“自下而上”
 - `head.init_weights`：`v = torch.linspace(0.9, 0.1, P)`（首点在下=车后，末点在上=车前）；
@@ -341,4 +341,30 @@ repel_weight=0.0, spread_weight=0.0
   （数据驱动，`field≥0.9` 中 `v` 最大者）；`relu(‖p0−anchor‖−margin)`；与 `start_gather` 叠加
   ⇒ 线从车后沿车道贯穿到车前（越长越好）。**未实施**。
 - 其它候选（未采纳）：关键点扩到全域 / 长度奖励 / 骨架覆盖（方案 C）。
+
+### 12.6 旧距离场彻底清理（A+B）
+- 删除训练侧死代码：`dataset.mask_to_dist_field`、`__getitem__` 的 `dist_field_mode` 分支（改为直接调用 `mask_to_dist_field_norm`）。
+- 删除配置项：`dist_max_px`、`dist_field_mode`。
+- 删除调试侧对照：`vis_dist_field.old_dist_field`、"old dist" 面板；`render` 面板由 6 栏缩为 **5 栏**
+  （`seg | window field | removed | skeleton | keypoints`），扫描行标记改为 `panels[1:3]`；
+  `render_profile` 只保留窗口场曲线；`load/show/main` 去除 `old_f`/`max_dist_px`。
+- 验证：全仓库无 `mask_to_dist_field`(旧)、`old_dist_field`、`dist_max_px`、`dist_field_mode` 残留；
+  `Slim2Dataset` 新场正常；`vis_dist_field` 5 栏面板与 profile 正常渲染。
+
+### 12.7 数据集目录：train_dir / val_dir（str 或 list）
+- 配置：`data.train_dir` / `data.val_dir` 取代 `seg_dir`；**取消 `val_ratio` 随机切分**，训练/验证完全分开。
+- `dataset`：新增 `_resolve_dirs` / `_list_pngs`，支持 **str 或 list**（目录顺序 + 目录内按 stem 排序合并）。
+- `train` 用 `train_dir`；`infer` / `vis_dist_field` 新增 `--split {train,val}`（默认 train）。
+- `val_dir` 暂与 `train_dir` 相同（待替换为独立验证集）。
+
+### 12.8 3 层 decoder + 每层回传 loss（exp7）
+- `exp7 = deepcopy(exp5)`：`num_decoder_layers=3`、`decoder_layer_loss_weights=[0.5,0.5,1.0]`（共享 reg head）。
+- `head.loss` 支持 `reg_preds` 为 list：逐层算各项、按权重聚合到同名键；`total=Σ_l w_l·L_l`；
+  逐层加权损失存 `self.last_layer_losses`。`train` 用 `model(inp, return_all_layers=True)` 并打印/记录
+  `loss/layer{i}`；`run_val`/`infer` 仍只取最终层。
+- 注：`init_weights` 把 reg 末层 `weight` 置 0，故 **step0 三层 decoder 梯度为 0**，step1 起正常回传。
+
+### 12.9 可视化颜色集中到配置
+- `config.py` 新增模块级 `CLASS_COLORS` / `IGNORE_COLOR`（BGR）；`infer.py` / `vis_dist_field.py` 改为引用
+  `cfg_module.CLASS_COLORS` / `cfg_module.IGNORE_COLOR`。其余内联颜色暂留代码。
 

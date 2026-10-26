@@ -47,9 +47,7 @@ cfg_default = AttrDict({
         'cost_values': COST_VALUES,  # [0,1] 1.0=最高代价
         'ignore_cost': IGNORE_COST,
         'cost_sigma': 3.0,               # 代价图高斯平滑 sigma (像素)
-        'dist_max_px': 10.0,             # [旧场] 距离场归一化上限 (像素)
-        'dist_field_mode': 'new',        # 距离场模式: 'new'=窗口归一化场(默认) | 'old'=原实现
-        'dist_min_road_width': 5.0,      # [新场] 开运算剔除 < 该宽度的窄结构 (像素)
+        'dist_min_road_width': 5.0,      # 开运算剔除 < 该宽度的窄结构 (像素)
         'dist_ridge_window': 30.0,       # [新场] 局部最大(脊线高度)窗口半径 (像素)
         # 车前关键点提取 (从窗口场 dist_field 局部极大提取; 见 dataset.extract_keypoints_lm)
         'kp_win': 2.0,                   # 局部极大窗口半径 (px)

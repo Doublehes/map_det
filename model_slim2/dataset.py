@@ -39,19 +39,6 @@ def mask_to_cost(mask: np.ndarray, cost_values: dict, ignore_cost: float,
     return cost.astype(np.float32)
 
 
-def mask_to_dist_field(mask: np.ndarray, drivable_classes: tuple,
-                       ignore_index: int, max_dist_px: float) -> np.ndarray:
-    """可通行区距离场: 到非可通行边界的距离, 归一化 [0,1]; 非可通行区置 0"""
-    drivable = np.zeros(mask.shape, dtype=np.uint8)
-    for c in drivable_classes:
-        drivable[mask == c] = 255
-    drivable[mask == ignore_index] = 0
-    dist_px = cv2.distanceTransform((drivable > 0).astype(np.uint8), cv2.DIST_L2, 5)
-    out = np.clip(dist_px / max(max_dist_px, 1e-6), 0.0, 1.0).astype(np.float32)
-    out[drivable == 0] = 0.0
-    return out
-
-
 def _largest_cc(mask: np.ndarray, connectivity: int = 8) -> np.ndarray:
     """取最大连通域 (bool) —— 与 vis_dist_field._largest_cc 一致"""
     m = mask.astype(np.uint8)
@@ -222,14 +209,10 @@ class Slim2Dataset(Dataset):
         inp = mask_to_onehot(mask, self.cfg.num_classes, self.cfg.ignore_index)
         cost = mask_to_cost(mask, self.cfg.cost_values, self.cfg.ignore_cost,
                             self.cfg.ignore_index, self.cfg.cost_sigma)
-        if self.cfg.get('dist_field_mode', 'new') == 'new':
-            dist = mask_to_dist_field_norm(
-                mask, tuple(self.cfg.drivable_classes), self.cfg.ignore_index,
-                self.cfg.get('dist_min_road_width', 5.0),
-                self.cfg.get('dist_ridge_window', 30.0))
-        else:
-            dist = mask_to_dist_field(mask, tuple(self.cfg.drivable_classes),
-                                      self.cfg.ignore_index, self.cfg.dist_max_px)
+        dist = mask_to_dist_field_norm(
+            mask, tuple(self.cfg.drivable_classes), self.cfg.ignore_index,
+            self.cfg.get('dist_min_road_width', 5.0),
+            self.cfg.get('dist_ridge_window', 30.0))
 
         # 关键点: 复用已算好的窗口场 dist(=field), 不重算距离变换
         kp_max = int(self.cfg.get('kp_max', 100))
