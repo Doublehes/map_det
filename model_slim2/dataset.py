@@ -170,26 +170,37 @@ def augment_mask(mask: np.ndarray, cfg) -> np.ndarray:
     return np.ascontiguousarray(out)
 
 
+def _resolve_dirs(data_dir):
+    """把 str / list[str] 统一成 list[Path]"""
+    if isinstance(data_dir, (list, tuple)):
+        return [Path(d) for d in data_dir]
+    return [Path(data_dir)]
+
+
+def _list_pngs(dirs):
+    """按目录顺序收集所有 PNG; 每个目录内按文件名(数字优先)排序"""
+    files = []
+    for d in dirs:
+        if not d.is_dir():
+            raise FileNotFoundError(f'目录不存在: {d}')
+        ps = [p for p in d.iterdir() if p.suffix.lower() == '.png']
+        if not ps:
+            raise FileNotFoundError(f'目录中没有 PNG 文件: {d}')
+        files.extend(sorted(ps, key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem))
+    return files
+
+
 class Slim2Dataset(Dataset):
     """分割标签图数据集: 输入 one-hot, 监督信号 (代价图/距离场) 同源自标签图"""
 
-    def __init__(self, seg_dir, cfg, is_train=True):
+    def __init__(self, data_dir, cfg, is_train=True):
         self.cfg = cfg
         self.is_train = is_train
-        self.seg_dir = Path(seg_dir)
-
-        files = [p for p in self.seg_dir.iterdir() if p.suffix.lower() == '.png']
-        if not files:
-            raise FileNotFoundError(f'目录中没有 PNG 文件: {self.seg_dir}')
-        self.files = sorted(files, key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem)
-
-        indices = list(range(len(self.files)))
-        rng = random.Random(cfg.get('seed', 42))
-        rng.shuffle(indices)
-        num_val = max(1, int(len(indices) * cfg.get('val_ratio', 0.1)))
-        val_set = set(indices[:num_val])
-        self.split = [i for i in range(len(self.files)) if (i in val_set) == (not is_train)]
-        print(f'[Slim2Dataset] {"train" if is_train else "val"}: {len(self.split)}/{len(self.files)} 样本')
+        self.dirs = _resolve_dirs(data_dir)
+        self.files = _list_pngs(self.dirs)
+        self.split = list(range(len(self.files)))     # 训练/验证目录已分开, 不再切分
+        print(f'[Slim2Dataset] {"train" if is_train else "val"}: '
+              f'{len(self.files)} 样本, dirs={[str(d) for d in self.dirs]}')
 
     def __len__(self):
         return len(self.split)

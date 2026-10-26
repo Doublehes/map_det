@@ -20,8 +20,8 @@ from model_slim2.dataset import Slim2Dataset
 from model_slim2.losses import sample_map, loss_shares, keypoint_coverage_rate
 from model_slim2.model import Slim2Model
 
-CLASS_COLORS = {0: (0, 0, 255), 1: (0, 255, 0), 2: (200, 200, 200), 3: (0, 255, 255)}
-IGNORE_COLOR = (60, 60, 60)
+CLASS_COLORS = cfg_module.CLASS_COLORS
+IGNORE_COLOR = cfg_module.IGNORE_COLOR
 LINE_COLORS = [(0, 255, 0), (255, 0, 0), (0, 255, 255), (255, 0, 255),
                (0, 165, 255), (255, 255, 0), (128, 0, 255), (0, 255, 128)]
 
@@ -189,6 +189,8 @@ def main():
     parser.add_argument('--ckpt', default=None, help='checkpoint 路径')
     parser.add_argument('--save', default='', help='保存目录 (不弹窗)')
     parser.add_argument('--start', type=int, default=0)
+    parser.add_argument('--split', default='train', choices=('train', 'val'),
+                        help='读取 train_dir 还是 val_dir')
     args = parser.parse_args()
     cfg = cfg_module.CONFIGS[args.config]
 
@@ -206,7 +208,8 @@ def main():
     model.eval()
     print(f'[加载] epoch={ckpt.get("epoch", "?")}')
 
-    ds = Slim2Dataset(cfg.data.seg_dir, cfg.data, is_train=False)
+    data_dir = cfg.data.train_dir if args.split == 'train' else cfg.data.val_dir
+    ds = Slim2Dataset(data_dir, cfg.data, is_train=False)
     thr = cfg.cost_filter_thr
 
     save_dir = Path(args.save) if args.save else None

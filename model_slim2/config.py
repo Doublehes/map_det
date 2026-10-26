@@ -9,16 +9,43 @@ from copy import deepcopy
 from configs.default import AttrDict
 
 
+# ── 可视化颜色 (BGR; infer.py / vis_dist_field.py 共用) ──
+TARGET_CLASSES_4 = [
+    {"id": 0, "name": "high_cost_obstacle", "rgb": [255, 41, 10]},
+    {"id": 1, "name": "low_cost_obstacle", "rgb": [4, 250, 7]},
+    {"id": 2, "name": "road", "rgb": [230, 230, 230]},
+    {"id": 3, "name": "other", "rgb": [80, 50, 50]},
+]
+TARGET_CLASSES_6 = [
+    {"id": 0, "name": "person", "rgb": [255, 0, 255]},
+    {"id": 1, "name": "vehicle", "rgb": [255, 194, 7]},
+    {"id": 2, "name": "high_cost_obstacle", "rgb": [255, 41, 10]},
+    {"id": 3, "name": "low_cost_obstacle", "rgb": [4, 250, 7]},
+    {"id": 4, "name": "road", "rgb": [230, 230, 230]},
+    {"id": 5, "name": "other", "rgb": [80, 50, 50]},
+]
+use_6_classes = True
+IGNORE_COLOR = (60, 60, 60)
+CLASS_COLORS = {cls["id"]: tuple(cls["rgb"][::-1]) for cls in (TARGET_CLASSES_6 if use_6_classes else TARGET_CLASSES_4)}
+NUM_CLASSES = len(CLASS_COLORS)
+DRIVABLE_CLASSES = (4,) if use_6_classes else (2,)
+IGNORE_INDEX = 255
+COST_VALUES = {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.5, 4: 0.01, 5: 1.0} if use_6_classes else {0: 1.0, 1: 0.5, 2: 0.01, 3: 1.0}
+IGNORE_COST = 1.0
+
 cfg_default = AttrDict({
     'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
 
     'data': AttrDict({
-        'seg_dir': '/home/flow/Code/MilitaryModel/map_det/data_seg/rt_bev_semantic',
-        'num_classes': 4,
-        'drivable_classes': (2,),      # 可通行类: 低速区 + 路面
-        'ignore_index': 255,
-        'cost_values': {0: 1.0, 1: 0.5, 2: 0.01, 3: 1.0},  # [0,1] 1.0=最高代价
-        'ignore_cost': 1.0,
+        # 训练/验证分割图目录: str 或 [str, ...] (list 时合并所有目录的 PNG)
+        'train_dir': ['/home/flow/Code/bev_semantic/dazu_tms_1_cvt_label__norm__tms__scene1__bev_semantic',
+                      '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic'],
+        'val_dir':   '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic',  # 暂与 train 相同
+        'num_classes': NUM_CLASSES,
+        'drivable_classes': DRIVABLE_CLASSES,      # 可通行类: 低速区 + 路面
+        'ignore_index': IGNORE_INDEX,
+        'cost_values': COST_VALUES,  # [0,1] 1.0=最高代价
+        'ignore_cost': IGNORE_COST,
         'cost_sigma': 3.0,               # 代价图高斯平滑 sigma (像素)
         'dist_max_px': 10.0,             # [旧场] 距离场归一化上限 (像素)
         'dist_field_mode': 'new',        # 距离场模式: 'new'=窗口归一化场(默认) | 'old'=原实现
@@ -32,7 +59,6 @@ cfg_default = AttrDict({
         'kp_max': 100,                   # 最多关键点个数 (同时也是 padding 长度)
         'kp_vfront': 0.7,                # 只看车前: 保留 v <= 该值 (v=0 顶部=车前)
 
-        'val_ratio': 0.1,
         'seed': 42,
         # 几何增强 (只作用于标签图, 信号同源派生)
         'flip_prob': 0.5,
@@ -49,7 +75,7 @@ cfg_default = AttrDict({
         'type': 'resnet',
         'depth': 18,
         'pretrained': False,
-        'in_channels': 5,                # one-hot 4 + ignore 通道
+        'in_channels': NUM_CLASSES + 1,                # one-hot 4 + ignore 通道
     }),
 
     'neck': AttrDict({
@@ -151,9 +177,8 @@ exp4['work_dir'] = './work_dirs/exp4'
 
 
 exp5 = deepcopy(exp4)
-exp5['num_epochs'] = 200
+# exp5['num_epochs'] = 200
 exp5['map_det_head']['keypoint_coverage_weight'] = 5.0
-# exp5['data']['val_ratio'] = 0.1
 exp5['work_dir'] = './work_dirs/exp5'
 
 
@@ -171,6 +196,16 @@ exp7['map_det_head']['num_decoder_layers'] = 3
 exp7['map_det_head']['decoder_layer_loss_weights'] = [0.5, 0.5, 1.0]
 exp7['work_dir'] = './work_dirs/exp7'
 
+exp8 = deepcopy(exp5)
+exp8['map_det_head']['num_decoder_layers'] = 6
+exp8['map_det_head']['decoder_layer_loss_weights'] = [0.5, 0.5, 0.5, 0.5, 0.5, 1.0]
+exp8['work_dir'] = './work_dirs/exp8'
+
+exp9 = deepcopy(exp7)
+exp9['backbone']['depth'] = 50
+exp9['backbone']['pretrained'] = True
+exp9['work_dir'] = './work_dirs/exp9'
+
 
 CONFIGS = {
     'default': cfg_default,
@@ -181,6 +216,8 @@ CONFIGS = {
     'exp5': exp5,
     'exp6': exp6,
     'exp7': exp7,
+    'exp8': exp8,
+    'exp9': exp9,
 }
 
 cfg = cfg_default

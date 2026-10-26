@@ -28,8 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import model_slim2.config as cfg_module
 
-CLASS_COLORS = {0: (0, 0, 255), 1: (0, 255, 0), 2: (200, 200, 200), 3: (0, 255, 255)}
-IGNORE_COLOR = (60, 60, 60)
+CLASS_COLORS = cfg_module.CLASS_COLORS
+IGNORE_COLOR = cfg_module.IGNORE_COLOR
 
 # ── 调试参数 (改这里即可, 或加命令行) ──
 MIN_ROAD_WIDTH_PX = 5      # 距离场: 路宽 < 该值 -> 不算路 (剔除)
@@ -474,6 +474,8 @@ def main():
     parser = argparse.ArgumentParser(description='距离场调试 (方案A vs 现有)')
     parser.add_argument('--config', default='default', choices=list(cfg_module.CONFIGS.keys()))
     parser.add_argument('--start', type=int, default=0)
+    parser.add_argument('--split', default='train', choices=('train', 'val'),
+                        help='读取 train_dir 还是 val_dir')
     parser.add_argument('--min-width', type=float, default=MIN_ROAD_WIDTH_PX)
     parser.add_argument('--window', type=float, default=RIDGE_WINDOW_PX)
     parser.add_argument('--no-keep-main', dest='keep_main', action='store_false',
@@ -498,13 +500,16 @@ def main():
               field_floor=args.kp_field_floor, v_front=args.kp_vfront)
 
     cfg = cfg_module.CONFIGS[args.config]
-    seg_dir = Path(cfg.data.seg_dir)
+    data_dir = cfg.data.train_dir if args.split == 'train' else cfg.data.val_dir
+    dirs = [Path(d) for d in data_dir] if isinstance(data_dir, (list, tuple)) else [Path(data_dir)]
     ignore_index = cfg.data.ignore_index
     drivable = tuple(cfg.data.drivable_classes)
     max_dist_px = cfg.data.get('dist_max_px', 10.0)
 
-    files = sorted([p for p in seg_dir.iterdir() if p.suffix.lower() == '.png'],
-                   key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem)
+    files = []
+    for d in dirs:
+        files.extend(sorted([p for p in d.iterdir() if p.suffix.lower() == '.png'],
+                           key=lambda p: int(p.stem) if p.stem.isdigit() else p.stem))
     print(f'[vis_dist_field] {len(files)} 张, drivable={drivable}, max_dist_px={max_dist_px}')
     print(f'  参数: min_road_width={min_w}px, ridge_window={win_r}px, '
           f'keep_main={keep_main}(conn={cc_conn})  |  '

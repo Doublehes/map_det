@@ -147,14 +147,14 @@ def main():
     print(f'[设备] {cfg.device}')
     print(f'[工作目录] {cfg.work_dir}')
 
-    train_dataset = Slim2Dataset(cfg.data.seg_dir, cfg.data, is_train=True)
+    train_dataset = Slim2Dataset(cfg.data.train_dir, cfg.data, is_train=True)
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.data.batch_size, shuffle=True,
         num_workers=cfg.data.num_workers, collate_fn=collate_fn, drop_last=True)
 
     val_loader = None
     if cfg.get('val_interval', 0) > 0:
-        val_dataset = Slim2Dataset(cfg.data.seg_dir, cfg.data, is_train=False)
+        val_dataset = Slim2Dataset(cfg.data.val_dir, cfg.data, is_train=False)
         val_loader = DataLoader(
             val_dataset, batch_size=cfg.data.batch_size, shuffle=False,
             num_workers=cfg.data.num_workers, collate_fn=collate_fn, drop_last=False)
