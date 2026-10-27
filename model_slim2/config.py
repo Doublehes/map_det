@@ -25,7 +25,7 @@ TARGET_CLASSES_6 = [
     {"id": 5, "name": "other", "rgb": [80, 50, 50]},
 ]
 use_6_classes = True
-IGNORE_COLOR = (60, 60, 60)
+IGNORE_COLOR = (255, 255, 255)
 CLASS_COLORS = {cls["id"]: tuple(cls["rgb"][::-1]) for cls in (TARGET_CLASSES_6 if use_6_classes else TARGET_CLASSES_4)}
 NUM_CLASSES = len(CLASS_COLORS)
 DRIVABLE_CLASSES = (4,) if use_6_classes else (2,)
@@ -38,8 +38,10 @@ cfg_default = AttrDict({
 
     'data': AttrDict({
         # 训练/验证分割图目录: str 或 [str, ...] (list 时合并所有目录的 PNG)
-        'train_dir': ['/home/flow/Code/bev_semantic/dazu_tms_1_cvt_label__norm__tms__scene1__bev_semantic',
-                      '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic'],
+        'train_dir': [
+            '/home/flow/Code/bev_semantic/dazu_tms_1_cvt_label__norm__tms__scene1__bev_semantic',
+            '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic',
+        ],
         'val_dir':   '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic',  # 暂与 train 相同
         'num_classes': NUM_CLASSES,
         'drivable_classes': DRIVABLE_CLASSES,      # 可通行类: 低速区 + 路面

@@ -1,6 +1,6 @@
 # model_slim2 工作总结
 
-> **最新进展见 §12（2026-10-16）。** §8 / §10.9 / §11.6 的遗留项已按 §12 标注状态。
+> **最新进展见 §14（2026-10-27）。** §13.4/§13.5 的骨架距离场/fusion 已被 §14.1 取代；当前 vis 距离场为局部厚度 base，训练侧仍为窗口场。§8 / §10.9 / §11.6 的遗留项已按 §12 标注状态。
 
 ## 1. 任务目标
 
@@ -367,4 +367,183 @@ repel_weight=0.0, spread_weight=0.0
 ### 12.9 可视化颜色集中到配置
 - `config.py` 新增模块级 `CLASS_COLORS` / `IGNORE_COLOR`（BGR）；`infer.py` / `vis_dist_field.py` 改为引用
   `cfg_module.CLASS_COLORS` / `cfg_module.IGNORE_COLOR`。其余内联颜色暂留代码。
+
+
+---
+
+## 13. 迭代总结（2026-10-26）
+
+### 13.1 共享预处理 `preclean_mask`（距离场/骨架共用，一次处理）
+- 新函数 `preclean_mask(...)`：**开运算 → [类别感知高斯平滑] → [填小洞] → [最大连通域]**，
+  返回 `dict(mask, removed, filled, removed_cc, expanded_low)`。
+- `build_field(clean_mask,...)` 与 `build_skeleton(clean_mask,...)` 都改为**直接接收预处理结果**；
+  `load()` 每帧只调用一次 `preclean_mask`，两条链共用（不再各自预处理）。
+- 统一参数：`MIN_ROAD_WIDTH_PX=6`、`SMOOTH_SIGMA=2.0`、`FILL_MAX_AREA=8`、`CC_CONNECTIVITY=8`；
+  删除 `_preclean_mask`、`SKEL_MIN_WIDTH_PX`。
+
+### 13.2 类别感知平滑（软值 + 距离门控）
+- 软值图：`road=1`、`low_cost`(3 与 255/i.e. ignore)=`S_LOW`(0.8)、其它类=`S_OTHER`(0.0)；
+  高斯平滑后 `>0.5` 二值化。
+- **距离门控** `R=3σ`：低代价区/ignore 只在距道路 `≤R` 的窄带内参与并入，**避免整片低代价区被吞并**
+  （初版常数软值会误并入上万像素）。
+- CLI：`--s-low`、`--s-other`、`--no-class-aware`。`LOW_COST_CLASSES=(3,255)`（用户决定 ignore 也算 low）。
+
+### 13.3 可视化面板与"道路区域"
+- 面板顺序改为 **`seg | 道路区域 | 距离场 | 骨架 | 关键点`**。
+- 「道路区域」**只显示最终道路**（绿 on 黑），移除 orange/黄/红/洋红叠加；终端仍打印
+  `merged_low/filled/removed/cc_removed` 统计。
+- 扫描行标记只画在「距离场」面板。
+
+### 13.4 距离场"颈部/平台"问题 → 骨架距离归一化
+
+> 状态更新（§14.1）：该 skeleton/fusion 距离场已删除；vis 最终改用局部厚度 base（`dist/T`）。
+- **问题**：越野路宽持续变化，旧窗口法 `dist/local_max` 在颈部 `field<1`；局部厚度 `dist/T`
+  在宽↔窄过渡口仍被宽侧内切圆抬高；最近骨架半宽 `dist/W` 又因 `dist>W` 被 `clip` 成**大片 1 平台**
+  （实测 road 上 `≥0.99` 占 6.7–9.5%）。
+- **最终方案**：复用已有 `build_skeleton` 的 `skel`，`sk_=skel & (dist>=SKEL_MIN_DIST)`，
+  `d_axis=distanceTransform(~sk_)`，`field = dist / (dist + d_axis)`：
+  - 分母恒 `≥ dist` ⇒ `field ≤ 1`，**不再有 clip 平台**；
+  - 骨架（含颈部/岔口）`d_axis=0` ⇒ `field=1`；边界 `dist=0` ⇒ `0`；
+  - 直道 `field=1-|offset|/W`（线性，无平台）。
+- 结果：`≥0.99` 由 6.7–9.5% 降到 **1.7–2.5%**（即骨架线本身），骨架点 `mean=min=1.000`，耗时 ~0.4ms/张。
+- CLI：`--field-mode {skeleton,thickness}`（默认 `skeleton`）、`--skel-min-dist`（默认 2.0）；
+  `thickness` 模式保留可切换。
+
+### 13.5 遗留 / 后续
+
+> 状态更新（§14.1）：vis 侧已回到 base；训练侧 `dataset.mask_to_dist_field_norm` 仍是窗口场，尚未同步。
+- **训练侧尚未同步（已由 §14.1 取代）**：`dataset.mask_to_dist_field_norm` 仍是旧的窗口场；
+  训练用的仍是 `dist/local_max`。原先“把 skeleton field 同步到 dataset”的建议不再适用；
+  当前 vis 侧为局部厚度 base，训练/vis 仍不一致。
+- 需在真实数据上目视确认长颈/过渡口效果是否满足。
+- 历史遗留（§8/§11.6）仍有效：顶端分散、单路多线摊开、方向约束、骨架未接入训练等。
+
+---
+
+## 14. 迭代总结（2026-10-27）
+
+### 14.1 距离场回归 base（删除 skeleton / fusion）
+
+- 曾尝试：
+  - 骨架场 `field = dist / (dist + d_axis)`：颈部=1，但整场跟着骨架走；
+  - fusion：`base` + 脊线归一化 `dist/W` + 高斯门控 + 颈部救援。
+- 用户判断 fusion 效果差，最终**删除整条 fusion 链路**：
+  - 删除 `skeleton_width_field()`、`fuse_field()`、`distance_ridge()`、`ridge_width()`；
+  - 删除 `FUSION_*`、`RIDGE_*` 常量；
+  - 删除 CLI：`--field-mode`、`--skel-min-dist`、`--gate-sigma`、`--ridge-smooth`、`--ridge-eps`、`--ridge-min-dist`。
+- **vis 最终距离场 = 局部厚度 base**：
+  ```text
+  field = clip(dist / T, 0, 1)
+  T = local_thickness(dist)
+  ```
+  颈部/宽窄过渡处仍可能 <1，这是回到 base 后的已知行为。
+- 显示恢复 5 栏：
+  ```text
+  seg | road region | dist field (thickness) | skeleton | keypoints
+  ```
+  剖面图只保留一条 thickness 曲线；扫描行只画在距离场面板。
+- 保留 CLI：`--thickness-max-r`。
+- **重要不一致**：训练侧 `dataset.mask_to_dist_field_norm` 仍是窗口场 `dist / local_max`；
+  vis 侧当前是局部厚度 base，两者尚未同步。
+
+### 14.2 骨架前向约束（v 单调）
+
+- 常量：`V_BACK_TOL = 2`（允许累计回退 ≤2px）。
+- **主骨架**：
+  - 先用两次 BFS 取有序最长路径；
+  - 正反两方向找“累计正向 v 增量 ≤2”的最长连续窗口；
+  - 同长度时选起点 v 更大（更靠车后）的段。
+- **支路**：
+  - 从主骨架出发，支路第一步必须 `v` 不增（禁止直接后退）；
+  - 之后用 0-1 BFS，边代价 `max(0, v_nb - v_cur)`，只保留累计代价 ≤2 的像素；
+  - 无法前向到达的像素作为后向段删除。
+- 统计新增：
+  ```text
+  main_back, branch_max_back, removed_backward
+  ```
+- 446 结果：
+  - 原最长路径 297px，v178→25，前 94 步后退（v175→222）；
+  - 新主骨架 204px，v220→24，平滑前累计回退=2；
+  - `removed_backward=159`，v99→124 的后退支路被删除。
+
+### 14.3 主骨架边界端点收尾
+
+- 问题：道路斜着出图时，骨架在断口分叉，尾巴沿图像边界伸向角落。
+- 常量：
+  ```text
+  BORDER_MARGIN = 15
+  BORDER_CENTER_ALPHA = 0.8
+  BORDER_MAX_TRIM = 60
+  ```
+- 规则：
+  - 只处理主骨架两端；
+  - 端点距图像边界 ≤15px 时，沿主骨架回看最多 60px；
+  - 收到 `dist ≥ 0.8 × 局部最大` 的位置（道路断口中心）；
+  - 被剪掉的尾巴从骨架中删除。
+- 结果：
+  ```text
+  1116: (254,5)/(117,1) -> (250,25)/(134,10)  border_trim=37
+  74:   (254,34)/(6,4)  -> (242,58)/(11,19)   border_trim=39
+  1170: (242,30)/(0,69) -> (243,60)/(45,58)   border_trim=76
+  1316: (253,86)/(13,20)-> (249,81)/(13,20)   border_trim=5
+  446:  不变                                 border_trim=0
+  ```
+- 绿色支路暂未逐条做边界收尾。
+
+### 14.4 骨架几何平滑
+
+- 常量 / CLI：
+  ```text
+  SKEL_SMOOTH_ITERS = 5
+  SKEL_SMOOTH_LAMBDA = 0.5
+  --smooth-iters 5      # 0=关闭
+  ```
+- 算法：对 `kept` 骨架建 8 邻接图，做拉普拉斯平滑：
+  - 度=1 的端点、度≥3 的岔口固定；
+  - 度=2 的普通链节点：`p_new = (1-λ)*p + λ*mean(neighbors)`；
+  - 纯环连通块（没有端点/岔口）不平滑，避免整体收缩。
+- 数据表示：
+  - `build_skeleton()` 返回 dict：
+    ```text
+    kept / main / removed        # 原始 mask 保留
+    pos / edges / main_pts       # 平滑后的骨架图坐标
+    stats
+    ```
+  - `main_len` 仍按节点数；`main_back / branch_max_back` 按平滑坐标重算。
+- 渲染：
+  - 不再用 3×3 膨胀 mask；
+  - 绿=平滑支路（`cv2.line + LINE_AA`），红=平滑主骨架（`cv2.polylines + LINE_AA`）；
+  - `--smooth-iters 0` 时不改坐标，但仍用抗锯齿折线显示。
+- 效果（主骨架总转角）：
+  ```text
+  446:  1620° -> 741°
+  1116: 3420° -> 452°
+  74:   5355° -> 566°
+  1170: 2295° -> 600°
+  ```
+- 平滑后约束：
+  ```text
+  446:  main_back=1.41, branch_max_back=1.99
+  1116: main_back=0.00, branch_max_back=0.00
+  74:   main_back=0.00, branch_max_back=0.00
+  1170: main_back=0.00, branch_max_back=1.45
+  ```
+- 40 张抽样：`warn=0`、无空骨架、平滑点偏离原骨架 ≤1px。
+
+### 14.5 接口变化（仅 `vis_dist_field.py`）
+
+- `build_skeleton(clean_mask, prune_len, keep_main, smooth_iters)` 返回 dict，不再返回 4 元组。
+- 新增 `--smooth-iters`。
+- `load()` / `render()` 改为使用 `pos / edges / main_pts` 绘制平滑骨架。
+- 距离场、关键点、训练代码均未改动。
+
+### 14.6 遗留 / 后续
+
+- **训练侧距离场未同步**：`dataset` 仍是窗口场 `dist/local_max`，与 vis 的局部厚度 base 不一致。
+- 绿色支路没有逐条做边界收尾；目前只修主骨架端点。
+- 平滑固定端点/岔口，因此岔口处折角不会被抹平。
+- 纯环连通块不平滑。
+- 平滑后 `main_back / branch_max_back > 2` 只打印 warning，不自动降级（按当前选择）。
+- §12.5 车后起点锚定仍未实施。
+- 骨架仍未接入训练；关键点仍来自距离场。
 
