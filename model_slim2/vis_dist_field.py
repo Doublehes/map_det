@@ -22,6 +22,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from scipy import ndimage as ndi
+from scipy.spatial import cKDTree
 from skimage.morphology import skeletonize
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -59,9 +60,9 @@ SKEL_SMOOTH_LAMBDA = 0.5    # 拉普拉斯平滑权重
 # 车前关键点 (从距离场 win_f 局部极大提取, 仅车前 v<=VFRONT)
 KP_WIN = 2                  # 局部极大窗口半径 (px): field >= dilate(field, 2*win+1)
 KP_EPS = 0.02               # 平台容差 (字段单位[0,1]): 处理均匀宽度走廊的 field 平台
-KP_FIELD_FLOOR = 0.3        # 字段强度下限[0,1]: 丢弃太弱的枝
+KP_FIELD_FLOOR = 0.7        # 字段强度下限[0,1]: 丢弃太弱的枝
 KP_VFRONT = 0.7             # 只看车前: 保留 v <= 该值 (v=0 顶部=车前)
-KP_DMIN = 0.05              # 关键点最小间隔 (归一化): NMS 保证离散
+KP_DMIN = 0.1              # 关键点最小间隔 (归一化): NMS 保证离散
 KP_MAX = 100                  # 最多关键点个数
 
 
@@ -144,6 +145,86 @@ def field_stats(field: np.ndarray, clean_mask: np.ndarray) -> dict:
                 max=float(f[clean].max()))
 
 
+def skeleton_guided_field(clean_mask: np.ndarray, dist: np.ndarray,
+                          base_field: np.ndarray, skeleton_result: dict,
+                          sigma: float = 3.0):
+    """整条骨架引导的距离场修正
+
+    W(p)  = 原始骨架节点处的 dist
+    f_sk  = clip(dist / W, 0, 1)
+    gate  = exp(-(d_skel / sigma)^2)
+    field = (1-gate)*base + gate*f_sk
+
+    W 用原始节点 (窄颈处平滑坐标可能偏 1px); gate 用平滑后的骨架折线。
+    返回 (field, info)
+    """
+    clean = clean_mask.astype(bool)
+    base = base_field.astype(np.float32)
+    if not clean.any():
+        return np.zeros(clean.shape, np.float32), dict(
+            skel_field=0.0, low_base_field=0.0, low_base_n=0, far_diff=0.0,
+            skel_px=0, region_px=0)
+
+    pos = skeleton_result.get('pos', {})
+    edges = skeleton_result.get('edges', [])
+    nodes = list(pos.keys())
+    if not nodes:
+        return base.copy(), dict(
+            skel_field=0.0, low_base_field=0.0, low_base_n=0, far_diff=0.0,
+            skel_px=0, region_px=0)
+
+    # W: 原始骨架节点处的局部半宽
+    Wn = np.array([max(float(dist[p]), 1e-6) for p in nodes], np.float32)
+    xy = np.array([[float(p[1]), float(p[0])] for p in nodes], np.float32)
+    H, W = clean.shape
+    yy, xx = np.mgrid[0:H, 0:W]
+    tree = cKDTree(xy)
+    _, idx = tree.query(np.column_stack([xx.ravel(), yy.ravel()]), k=1)
+    Wpx = Wn[idx].reshape(H, W)
+    f_sk = np.clip(dist / np.maximum(Wpx, 1e-6), 0.0, 1.0).astype(np.float32)
+
+    # 平滑骨架折线 -> 门控距离
+    sk = np.zeros((H, W), np.uint8)
+    for a, b in edges:
+        ya, xa = pos[a]
+        yb, xb = pos[b]
+        cv2.line(sk,
+                 (int(round(xa)), int(round(ya))),
+                 (int(round(xb)), int(round(yb))),
+                 1, 1)
+    if not sk.any():
+        for p in nodes:
+            y = int(np.clip(round(pos[p][0]), 0, H - 1))
+            x = int(np.clip(round(pos[p][1]), 0, W - 1))
+            sk[y, x] = 1
+    if not sk.any():
+        return base.copy(), dict(
+            skel_field=0.0, low_base_field=0.0, low_base_n=0, far_diff=0.0,
+            skel_px=0, region_px=0)
+
+    sk_bool = sk.astype(bool)
+    d_skel = cv2.distanceTransform((~sk_bool).astype(np.uint8), cv2.DIST_L2, 5)
+    gate = np.exp(-(d_skel / max(float(sigma), 1e-6)) ** 2).astype(np.float32)
+    field = (1.0 - gate) * base + gate * f_sk
+    field[~clean] = 0.0
+    field = field.astype(np.float32)
+
+    low_base = sk_bool & (base < 0.9)
+    low_base_n = int(low_base.sum())
+    low_base_field = float(field[low_base].mean()) if low_base_n else 1.0
+    far = (d_skel > 5.0) & clean
+    far_diff = float(np.abs(field[far] - base[far]).mean()) if far.any() else 0.0
+    info = dict(
+        skel_field=float(field[sk_bool].mean()),
+        low_base_field=low_base_field,
+        low_base_n=low_base_n,
+        far_diff=far_diff,
+        skel_px=int(sk_bool.sum()),
+        region_px=int((gate > 0.01).sum()),
+    )
+    return field, info
+
+
 def _selftest_mask() -> np.ndarray:
     """合成等宽直道"""
     m = np.zeros((120, 61), np.uint8)
@@ -170,6 +251,26 @@ def selftest() -> None:
     field = run(np.zeros((20, 20), np.uint8))
     assert float(field.sum()) == 0.0
     print('[selftest] 空 mask: OK')
+
+    # 骨架引导场: 合成窄颈
+    neck = _selftest_mask()
+    for y in range(50, 60):
+        neck[y, :] = 0
+        neck[y, 28:33] = 1
+    skel_r = build_skeleton(neck, PRUNE_LEN, True, SKEL_SMOOTH_ITERS)
+    dist = cv2.distanceTransform(neck.astype(np.uint8), cv2.DIST_L2, 5)
+    base = build_field(neck, THICKNESS_MAX_R, dist=dist)
+    base[neck == 0] = 0.0
+    guided, _ = skeleton_guided_field(neck, dist, base, skel_r, 3.0)
+    print(f'[selftest] 窄颈: base(50,30)={base[50, 30]:.3f} '
+          f'guided(50,30)={guided[50, 30]:.3f} '
+          f'guided(55,30)={guided[55, 30]:.3f} '
+          f'guided(60,30)={guided[60, 30]:.3f}')
+    assert base[50, 30] < 0.5, '合成颈入口 base 应偏低'
+    assert guided[50, 30] > 0.95, '修正后窄颈入口应接近 1'
+    assert guided[55, 30] > 0.95, '修正后窄颈中心应接近 1'
+    assert guided[60, 30] > 0.95, '修正后窄颈出口应接近 1'
+    assert guided[5, 30] == 0.0, '道路外应为 0'
     print('[selftest] PASS')
 
 
@@ -656,11 +757,13 @@ def build_skeleton(clean_mask: np.ndarray, prune_len: int = PRUNE_LEN,
                 pos=pos, edges=edges, main_pts=main_pts, stats=stats)
 
 
-def render_profile(win_row: np.ndarray, scan_row: int,
+def render_profile(base_row: np.ndarray, corrected_row, scan_row: int,
+                   show_corrected: bool = True,
                    w: int = 560, h: int = 280) -> np.ndarray:
-    """把某一行的距离场值画成曲线图 (cv2 手绘, 不依赖 matplotlib)
+    """把某一行的 base / 修正后距离场画成曲线图 (cv2 手绘)
 
-    x 轴: 图像列 u; y 轴: 场值 0~1。绿=局部厚度场。
+    x 轴: 图像列 u; y 轴: 场值 0~1。
+    绿=base(局部厚度), 青=修正后(骨架引导)。
     """
     canvas = np.full((h, w, 3), 30, dtype=np.uint8)
     x0, x1 = 64, w - 16
@@ -688,7 +791,9 @@ def render_profile(win_row: np.ndarray, scan_row: int,
             cv2.line(canvas, (int(xs[i]), int(ys[i])), (int(xs[i + 1]), int(ys[i + 1])),
                      color, thickness, cv2.LINE_AA)
 
-    draw(win_row, (0, 255, 0), 2)           # BGR 绿
+    draw(base_row, (0, 255, 0), 1)          # base BGR 绿
+    if show_corrected and corrected_row is not None:
+        draw(corrected_row, (255, 255, 0), 2)   # corrected BGR 青
 
     # 标题 + 轴标签
     cv2.putText(canvas, f'scanline profile  row = {scan_row}',
@@ -699,10 +804,15 @@ def render_profile(win_row: np.ndarray, scan_row: int,
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (185, 185, 185), 1, cv2.LINE_AA)
 
     # 图例 (右上: 色块 + 文字)
-    lx, ly = x1 - 100, 46
-    cv2.line(canvas, (lx, ly), (lx + 26, ly), (0, 255, 0), 2, cv2.LINE_AA)
-    cv2.putText(canvas, 'thickness', (lx + 32, ly + 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 230, 230), 1, cv2.LINE_AA)
+    lx, ly = x1 - 108, 46
+    legend = [('base', (0, 255, 0))]
+    if show_corrected and corrected_row is not None:
+        legend.insert(0, ('corrected', (255, 255, 0)))
+    for i, (name, color) in enumerate(legend):
+        yy = ly + i * 18
+        cv2.line(canvas, (lx, yy), (lx + 26, yy), color, 2, cv2.LINE_AA)
+        cv2.putText(canvas, name, (lx + 32, yy + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 230, 230), 1, cv2.LINE_AA)
     return canvas
 
 
@@ -746,9 +856,11 @@ def extract_keypoints_lm(field: np.ndarray, win: float = KP_WIN, eps: float = KP
     return kept, cands
 
 
-def render(mask, road_mask, win_f, skeleton, token, min_w, thick_max,
-           scan_row, kp_pts=None, kp_cands=None, v_front=KP_VFRONT):
+def render(mask, road_mask, base_f, win_f, skeleton, token, min_w, thick_max,
+           scan_row, show_corrected=True, skel_sigma=3.0,
+           kp_pts=None, kp_cands=None, v_front=KP_VFRONT):
     seg = colorize_mask(mask, 255)
+    base_vis = to_vis(base_f, cv2.COLORMAP_VIRIDIS)
     win_vis = to_vis(win_f, cv2.COLORMAP_VIRIDIS)
 
     # 道路区域(喂给距离场/骨架的 pre['mask']): 绿=最终道路区域, 其余黑
@@ -790,12 +902,15 @@ def render(mask, road_mask, win_f, skeleton, token, min_w, thick_max,
 
     panels = [('seg', seg),
               ('road region', road_vis),
-              ('dist field (thickness)', win_vis),
-              ('skeleton  main=red  branch=green', skel_vis),
-              ('keypoints  front local-max + NMS', kp_vis)]
-    # 扫描行标记
-    cv2.line(panels[2][1], (0, scan_row), (panels[2][1].shape[1] - 1, scan_row),
-             (255, 255, 255), 1, cv2.LINE_AA)
+              ('base field (thickness)', base_vis)]
+    if show_corrected:
+        panels.append(('corrected field (skel-guided)', win_vis))
+    panels += [('skeleton  main=red  branch=green', skel_vis),
+               ('keypoints  front local-max + NMS', kp_vis)]
+    # 扫描行标记: base + (可选) corrected
+    for idx in ((2, 3) if show_corrected else (2,)):
+        cv2.line(panels[idx][1], (0, scan_row), (panels[idx][1].shape[1] - 1, scan_row),
+                 (255, 255, 255), 1, cv2.LINE_AA)
     for name, p in panels:
         cv2.putText(p, name, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
 
@@ -808,7 +923,9 @@ def render(mask, road_mask, win_f, skeleton, token, min_w, thick_max,
     body = np.concatenate(parts, axis=1)
 
     header = np.full((30, body.shape[1], 3), 30, np.uint8)
-    cv2.putText(header, f'token={token}  field=thickness  smooth={skeleton["stats"].get("smooth_iters", 0)}x'
+    field_desc = 'thickness+skel_guided' if show_corrected else 'thickness'
+    cv2.putText(header, f'token={token}  field={field_desc}  sigma={skel_sigma:.1f}  '
+                        f'smooth={skeleton["stats"].get("smooth_iters", 0)}x'
                         f'{SKEL_SMOOTH_LAMBDA}  min_width={min_w}px  '
                         f'thickness_max_r={thick_max}(0=auto)  scan_row={scan_row}',
                 (8, 21), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
@@ -834,6 +951,10 @@ def main():
                         help='局部厚度最大半径上限, 0=自动(dist.max)')
     parser.add_argument('--smooth-iters', type=int, default=SKEL_SMOOTH_ITERS,
                         help='骨架几何平滑迭代次数, 0=关闭')
+    parser.add_argument('--skel-field-sigma', type=float, default=3.0,
+                        help='骨架引导距离场的门控宽度 sigma (px)')
+    parser.add_argument('--no-skel-field', dest='skel_field', action='store_false',
+                        default=True, help='关闭骨架引导距离场修正')
     parser.add_argument('--selftest', action='store_true',
                         help='运行合成自测后退出 (不读数据/不弹窗)')
     parser.add_argument('--no-keep-main', dest='keep_main', action='store_false',
@@ -864,6 +985,8 @@ def main():
     smooth_sigma, prune_len, fill_max_area = args.smooth, args.prune, args.fill_max_area
     s_low, s_other, class_aware = args.s_low, args.s_other, args.class_aware
     smooth_iters = args.smooth_iters
+    skel_field_on = args.skel_field
+    skel_field_sigma = args.skel_field_sigma
     kp = dict(win=args.kp_win, d_min=args.kp_dmin, max_pts=args.kp_max,
               field_floor=args.kp_field_floor, v_front=args.kp_vfront)
 
@@ -882,7 +1005,8 @@ def main():
           f'keep_main={keep_main}(conn={cc_conn})  |  thickness_max_r={thick_max}(0=auto), prune={prune_len}px, '
           f'skel_smooth={smooth_iters}x{SKEL_SMOOTH_LAMBDA}')
     print(f'  类别感知平滑: {class_aware} (low_cost={LOW_COST_CLASSES}, s_low={s_low}, s_other={s_other})')
-    print(f'  距离场: 局部厚度归一化  thickness_max_r={thick_max}(0=auto)')
+    print(f'  距离场: 局部厚度归一化  thickness_max_r={thick_max}(0=auto)  |  '
+          f'skel_guided={skel_field_on} sigma={skel_field_sigma}')
 
     win, win_prof = 'dist_field', 'profile'
     LEFT_KEYS = {81, 2424832, 65361}
@@ -904,16 +1028,27 @@ def main():
         skel_result = build_skeleton(pre['mask'], prune_len, keep_main, smooth_iters)
         sk = skel_result['stats']
         dist = cv2.distanceTransform(pre['mask'], cv2.DIST_L2, 5)
-        win_f = build_field(pre['mask'], thick_max, dist=dist)
-        win_f[pre['mask'] == 0] = 0.0
+        base_f = build_field(pre['mask'], thick_max, dist=dist)
+        base_f[pre['mask'] == 0] = 0.0
+        if skel_field_on:
+            win_f, finfo = skeleton_guided_field(
+                pre['mask'], dist, base_f, skel_result, skel_field_sigma)
+        else:
+            win_f, finfo = base_f.copy(), None
         kp_pts, kp_cands = extract_keypoints_lm(win_f, **kp)
         st = field_stats(win_f, pre['mask'])
+        st_base = field_stats(base_f, pre['mask'])
         print(f'[样本 {i}] token={path.stem}  normal={int(pre["mask"].sum())}px  '
               f'merged_low={int(pre["expanded_low"].sum())}px  '
               f'filled={int(pre["filled"].sum())}px  removed={int(pre["removed"].sum())}px  '
               f'cc_removed={int(pre["removed_cc"].sum())}px  keep_main={keep_main} conn={cc_conn}  '
-              f'field: plateau={st["plateau"]*100:.1f}% max={st["max"]:.2f}  |  '
-              f'skel: pix={sk["pix"]}->{sk["pix_pruned"]}->{sk["pix_kept"]} '
+              f'field base: plateau={st_base["plateau"]*100:.1f}% max={st_base["max"]:.2f}  |  '
+              f'corrected: plateau={st["plateau"]*100:.1f}% max={st["max"]:.2f}')
+        if finfo is not None:
+            print(f'    skel_guided: sigma={skel_field_sigma} skel={finfo["skel_field"]:.3f} '
+                  f'low_base={finfo["low_base_field"]:.3f}(n={finfo["low_base_n"]}) '
+                  f'far_diff={finfo["far_diff"]:.3f} region={finfo["region_px"]}px')
+        print(f'  skel: pix={sk["pix"]}->{sk["pix_pruned"]}->{sk["pix_kept"]} '
               f'smooth={sk["smooth_iters"]}x{SKEL_SMOOTH_LAMBDA} '
               f'main={sk["main_len"]} (v{sk["main_v0"]}->{sk["main_v1"]}, back={sk["main_back"]:.2f}, '
               f'border_trim={sk["border_trim"]}) '
@@ -925,15 +1060,20 @@ def main():
                   f'branch={sk["branch_max_back"]:.2f} > tol={V_BACK_TOL}')
         print(f'    车前关键点: 候选={len(kp_cands)} 入选={len(kp_pts)}  '
                + ' '.join(f'({u:.2f},{v:.2f},f={d:.2f})' for (u, v, d) in kp_pts))
-        return dict(mask=mask, pre=pre, win_f=win_f, skeleton=skel_result,
-                    kp_pts=kp_pts, kp_cands=kp_cands,
+        return dict(mask=mask, pre=pre, base_f=base_f, win_f=win_f,
+                    skel_field_on=skel_field_on, skel_field_sigma=skel_field_sigma,
+                    skeleton=skel_result, kp_pts=kp_pts, kp_cands=kp_cands,
                     token=path.stem, h=win_f.shape[0])
 
     def show(s):
-        cv2.imshow(win, render(s['mask'], s['pre']['mask'], s['win_f'],
-                               s['skeleton'], s['token'], min_w, thick_max,
-                               scan_row, s['kp_pts'], s['kp_cands'], kp['v_front']))
-        cv2.imshow(win_prof, render_profile(s['win_f'][scan_row], scan_row))
+        cv2.imshow(win, render(
+            s['mask'], s['pre']['mask'], s['base_f'], s['win_f'], s['skeleton'],
+            s['token'], min_w, thick_max, scan_row,
+            show_corrected=s['skel_field_on'], skel_sigma=s['skel_field_sigma'],
+            kp_pts=s['kp_pts'], kp_cands=s['kp_cands'], v_front=kp['v_front']))
+        cv2.imshow(win_prof, render_profile(
+            s['base_f'][scan_row], s['win_f'][scan_row],
+            scan_row, show_corrected=s['skel_field_on']))
 
     idx = args.start % len(files)
     s = load(idx)
