@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+import cv2
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -20,6 +21,29 @@ import model_slim2.config as cfg_module
 from model_slim2.dataset import Slim2Dataset, collate_fn
 from model_slim2.losses import sample_map, loss_shares, keypoint_coverage_rate
 from model_slim2.model import Slim2Model
+
+
+def _worker_init_fn(worker_id):
+    """DataLoader worker 内限制 OpenCV 线程, 避免与多 worker 超卖."""
+    cv2.setNumThreads(1)
+
+
+def _loader_kwargs(cfg, persistent: bool):
+    """统一 DataLoader 参数; num_workers 上限 , 0 时禁用 worker 专属参数."""
+    nw = min(int(cfg.data.num_workers), 12)
+    kw = dict(
+        batch_size=cfg.data.batch_size,
+        num_workers=nw,
+        collate_fn=collate_fn,
+        pin_memory=True,
+    )
+    if nw > 0:
+        kw.update(
+            persistent_workers=persistent,
+            prefetch_factor=4,
+            worker_init_fn=_worker_init_fn,
+        )
+    return kw
 
 
 def load_pretrained(model, checkpoint_path, device):
@@ -149,15 +173,15 @@ def main():
 
     train_dataset = Slim2Dataset(cfg.data.train_dir, cfg.data, is_train=True)
     train_loader = DataLoader(
-        train_dataset, batch_size=cfg.data.batch_size, shuffle=True,
-        num_workers=cfg.data.num_workers, collate_fn=collate_fn, drop_last=True)
+        train_dataset, shuffle=True, drop_last=True,
+        **_loader_kwargs(cfg, persistent=True))
 
     val_loader = None
     if cfg.get('val_interval', 0) > 0:
         val_dataset = Slim2Dataset(cfg.data.val_dir, cfg.data, is_train=False)
         val_loader = DataLoader(
-            val_dataset, batch_size=cfg.data.batch_size, shuffle=False,
-            num_workers=cfg.data.num_workers, collate_fn=collate_fn, drop_last=False)
+            val_dataset, shuffle=False, drop_last=False,
+            **_loader_kwargs(cfg, persistent=False))
 
     model = Slim2Model(cfg).to(cfg.device)
     if cfg.pretrained and os.path.exists(cfg.pretrained):
@@ -183,8 +207,9 @@ def main():
     for epoch in range(cfg.num_epochs):
         model.train()
         total_loss = 0.0
-        t0 = time.time()
+        t0 = t_epoch_start = time.time()
         for batch_idx, batch in enumerate(train_loader):
+            t1 = time.time()
             inp = batch['input'].to(cfg.device)
             cls_scores, reg_preds = model(inp, return_all_layers=True)
             loss_dict = model.compute_loss(cls_scores, reg_preds, batch)
@@ -195,6 +220,7 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_max_norm)
             optimizer.step()
 
+            t2 = time.time()
             total_loss += loss.item()
             if scheduler is not None:
                 scheduler.step()
@@ -212,18 +238,26 @@ def main():
             if layer_losses is not None:
                 for i, lv in enumerate(layer_losses):
                     writer.add_scalar(f'loss/layer{i}', lv.item(), global_step)
-
+            
+            t3 = time.time()
             if batch_idx % cfg.log_interval == 0:
                 items = ' '.join(f'{k}={v.item():.3f}' for k, v in loss_dict.items())
                 share_str = ' '.join(f'{k}={100 * v:.0f}%' for k, v in shares.items())
-                print(f'[E {epoch + 1}/{cfg.num_epochs}] [{batch_idx}/{len(train_loader)}] {items}')
-                print(f'    share: {share_str}')
+                print(f'[E {epoch + 1}/{cfg.num_epochs}] [{batch_idx}/{len(train_loader)}]'
+                      f'data:{t1 - t0:.2f}s '
+                      f'model:{t2 - t1:.2f}s '
+                      f'log:{t3 - t2:.2f}s '
+                      f'{items}')
+                # print(f'    share: {share_str}')
                 if layer_losses is not None:
                     print('    layer: ' + ' '.join(
                         f'L{i}={lv.item():.3f}' for i, lv in enumerate(layer_losses)))
 
+            t0 = time.time()
+
+
         avg_loss = total_loss / max(len(train_loader), 1)
-        print(f'[Epoch {epoch + 1}] 平均 loss={avg_loss:.4f} 耗时={time.time() - t0:.0f}s')
+        print(f'[Epoch {epoch + 1}] 平均 loss={avg_loss:.4f} 耗时={time.time() - t_epoch_start:.2f}s')
         writer.add_scalar('epoch/avg_loss', avg_loss, epoch)
 
         ckpt = {

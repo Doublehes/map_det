@@ -40,22 +40,24 @@ cfg_default = AttrDict({
         # 训练/验证分割图目录: str 或 [str, ...] (list 时合并所有目录的 PNG)
         'train_dir': [
             '/home/flow/Code/bev_semantic/dazu_tms_1_cvt_label__norm__tms__scene1__bev_semantic',
-            '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic',
+            # '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic',
         ],
-        'val_dir':   '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic',  # 暂与 train 相同
+        'val_dir':   [
+            '/home/flow/Code/bev_semantic/dazu_tms_1_cvt_label__norm__tms__scene1__bev_semantic',
+            # '/home/flow/Code/bev_semantic/dazu_tms_2_cvt_label__norm__tms__scene2__bev_semantic',
+            # '/home/flow/Code/bev_semantic/als_compitetion_cvt_label__norm__vehicle0__als_1_merged__bev_semantic',
+            # '/home/flow/Code/bev_semantic/als_compitetion_cvt_label__norm__vehicle0__als_2_merged__bev_semantic',
+        ],
         'num_classes': NUM_CLASSES,
         'drivable_classes': DRIVABLE_CLASSES,      # 可通行类: 低速区 + 路面
         'ignore_index': IGNORE_INDEX,
+        'low_cost_classes': (3, 255),
         'cost_values': COST_VALUES,  # [0,1] 1.0=最高代价
         'ignore_cost': IGNORE_COST,
         'cost_sigma': 3.0,               # 代价图高斯平滑 sigma (像素)
-        'dist_min_road_width': 5.0,      # 开运算剔除 < 该宽度的窄结构 (像素)
-        'dist_ridge_window': 30.0,       # [新场] 局部最大(脊线高度)窗口半径 (像素)
-        # 车前关键点提取 (从窗口场 dist_field 局部极大提取; 见 dataset.extract_keypoints_lm)
-        'kp_win': 2.0,                   # 局部极大窗口半径 (px)
-        'kp_eps': 0.02,                  # 平台容差 (字段单位 [0,1])
-        'kp_field_floor': 0.5,           # 字段强度下限 [0,1]
-        'kp_dmin': 0.05,                  # 关键点最小间隔 (归一化, NMS)
+
+        # 车前关键点提取 (从平滑骨架节点做 FPS)
+        'kp_spacing': 0.1,              # 骨架 FPS 覆盖半径/关键点间距 (归一化 uv)
         'kp_max': 100,                   # 最多关键点个数 (同时也是 padding 长度)
         'kp_vfront': 0.7,                # 只看车前: 保留 v <= 该值 (v=0 顶部=车前)
 
@@ -68,7 +70,7 @@ cfg_default = AttrDict({
         'bend_amp': 0.04,                # 归一化幅度 (相对图像宽)
         'bend_wavelength': (0.3, 0.8),   # 归一化波长 (相对图像宽)
         'batch_size': 16,
-        'num_workers': 4,
+        'num_workers': 12,
     }),
 
     'backbone': AttrDict({
@@ -144,7 +146,7 @@ cfg_default = AttrDict({
 
 exp1 = deepcopy(cfg_default)
 exp1['map_det_head']['interior_weight'] = 1.0
-exp1['num_epochs'] = 200
+# exp1['num_epochs'] = 200
 exp1['map_det_head']['min_arc'] = 0.8
 exp1['work_dir'] = './work_dirs/exp1'
 
@@ -153,7 +155,7 @@ exp2 = deepcopy(cfg_default)
 exp2['map_det_head']['cost_weight'] = 1.0
 exp2['map_det_head']['interior_weight'] = 0.0
 exp2['map_det_head']['min_arc'] = 0.8
-exp2['num_epochs'] = 200
+# exp2['num_epochs'] = 200
 exp2['work_dir'] = './work_dirs/exp2'
 
 # exp3: 多线结构损失 (要求输出线共享车后起点)
@@ -206,6 +208,14 @@ exp9['backbone']['depth'] = 50
 exp9['backbone']['pretrained'] = True
 exp9['work_dir'] = './work_dirs/exp9'
 
+exp10 = deepcopy(exp7)
+exp10['data']['kp_vfront'] = 0.9
+exp10['work_dir'] = './work_dirs/exp10'
+
+exp11 = deepcopy(exp10)
+exp11['data']['kp_vfront'] = 0.9
+exp11['data']['cost_values'] =  {0: 10.0, 1: 10.0, 2: 10.0, 3: 0.5, 4: 0.01, 5: 10.0}
+exp11['work_dir'] = './work_dirs/exp11'
 
 CONFIGS = {
     'default': cfg_default,
@@ -218,6 +228,8 @@ CONFIGS = {
     'exp7': exp7,
     'exp8': exp8,
     'exp9': exp9,
+    'exp10': exp10,
+    'exp11': exp11,
 }
 
 cfg = cfg_default
