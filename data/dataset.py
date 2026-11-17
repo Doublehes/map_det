@@ -149,11 +149,10 @@ class MapTRDataset(Dataset):
             'sample_idx': sample['sample_idx'],
         }
 
-        sem_mask = self._load_semantic_mask(sample)
-        ret['semantic_mask'] = sem_mask    # (1, 80, 160)
+        ret['semantic_mask'] = self._load_semantic_mask(sample, map_vectors)  # (1, 80, 160)
 
-        soft_heatmap = self._load_soft_heatmap(sample)
-        ret['soft_heatmap'] = soft_heatmap  # (1, 80, 160)
+        if getattr(self.cfg, 'compute_heatmap', True):
+            ret['soft_heatmap'] = self._load_soft_heatmap(sample, map_vectors)  # (1, 80, 160)
 
         ret['flip'] = do_flip
         ret['rot_angle'] = rot_angle
@@ -246,9 +245,10 @@ class MapTRDataset(Dataset):
         )
         return vectors
 
-    def _load_semantic_mask(self, sample):
+    def _load_semantic_mask(self, sample, vectors=None):
         """将向量线栅格化为分割掩码 (辅助监督)"""
-        vectors = self._load_map(sample)
+        if vectors is None:
+            vectors = self._load_map(sample)
         sem_mask = rasterize_map(
             vectors,
             canvas_size=self.cfg.canvas_size,  # (80, 160) = (H=行/Y, W=列/X)
@@ -258,9 +258,10 @@ class MapTRDataset(Dataset):
         )
         return torch.from_numpy(sem_mask).float().flip(dims=[1])
 
-    def _load_soft_heatmap(self, sample):
+    def _load_soft_heatmap(self, sample, vectors=None):
         """计算BEV自适应高斯热力图: sigma=min(d_center+d_boundary, 5m)"""
-        vectors = self._load_map(sample)
+        if vectors is None:
+            vectors = self._load_map(sample)
         heatmap = compute_soft_heatmap(
             vectors,
             canvas_size=self.cfg.canvas_size,
@@ -305,8 +306,9 @@ def collate_fn(batch):
         heatmaps = torch.stack([b['soft_heatmap'] for b in batch], dim=0)
         ret['soft_heatmap'] = heatmaps  # (B, 1, 80, 160)
 
-    ret['flip'] = torch.tensor([b.get('flip', False) for b in batch], dtype=torch.bool)
-    ret['rot_angle'] = torch.tensor([b.get('rot_angle', 0.0) for b in batch], dtype=torch.float32)
-    ret['dx'] = torch.tensor([b.get('dx', 0.0) for b in batch], dtype=torch.float32)
-    ret['dy'] = torch.tensor([b.get('dy', 0.0) for b in batch], dtype=torch.float32)
+    # 保留 Python 值, 供 BEVTransform 使用 (避免 tensor->bool 同步)
+    ret['flip'] = [bool(b.get('flip', False)) for b in batch]
+    ret['rot_angle'] = [float(b.get('rot_angle', 0.0)) for b in batch]
+    ret['dx'] = [float(b.get('dx', 0.0)) for b in batch]
+    ret['dy'] = [float(b.get('dy', 0.0)) for b in batch]
     return ret

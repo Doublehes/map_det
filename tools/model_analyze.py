@@ -227,7 +227,7 @@ def main():
     print(f'[加载] checkpoint: {args.checkpoint}')
 
     model = MapTR(cfg.model).to(cfg.device)
-    ckpt = torch.load(args.checkpoint, map_location=cfg.device)
+    ckpt = torch.load(args.checkpoint, map_location='cpu')
     model.load_state_dict(ckpt['model_state_dict'], strict=False)
     model.eval()
     print(f'[加载完成] epoch={ckpt.get("epoch", "?")}')

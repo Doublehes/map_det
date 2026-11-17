@@ -95,10 +95,53 @@ def point_sampling(ref_3d, pc_range, intrinsics, extrinsics, img_h, img_w):
     return ref_points_cam, bev_mask
 
 
+def point_sampling_vectorized(ref_3d, pc_range, intrinsics, extrinsics, img_h, img_w):
+    """向量化版 point_sampling: 一次处理 (B, num_cams), 与原实现数值等价
+
+    Returns:
+        reference_points_cam: (num_cams, B, num_query, D, 2)
+        bev_mask: (num_cams, B, num_query, D)
+    """
+    ref = ref_3d.clone()
+    B, D, num_query = ref.shape[:3]
+    num_cams = intrinsics.size(1)
+    device = ref.device
+
+    ref[..., 0] = ref[..., 0] * (pc_range[3] - pc_range[0]) + pc_range[0]
+    ref[..., 1] = ref[..., 1] * (pc_range[4] - pc_range[1]) + pc_range[1]
+    ref[..., 2] = ref[..., 2] * (pc_range[5] - pc_range[2]) + pc_range[2]
+
+    # (B, D, N, 3) -> (B, N, D, 4) -> (B, N*D, 4)
+    ref = ref.permute(0, 2, 1, 3)
+    ref_h = torch.cat([ref, torch.ones_like(ref[..., :1])], -1)
+    ref_h = ref_h.reshape(B, num_query * D, 4)
+
+    eps = 1e-5
+    # (B,C,4,4) @ (B,M,4) -> (B,C,M,4)
+    pts_cam = torch.einsum('bcij,bmj->bcmi', extrinsics, ref_h)
+    z = pts_cam[..., 2:3]
+    valid = (z > eps).squeeze(-1)
+    uv_norm = pts_cam[..., 0:2] / z.clamp(min=eps)
+    uv_h = torch.cat([uv_norm, torch.ones_like(uv_norm[..., :1])], -1)
+    uv_pix = torch.einsum('bcij,bcmj->bcmi', intrinsics, uv_h)
+
+    u = uv_pix[..., 0] / img_w
+    v = uv_pix[..., 1] / img_h
+    valid = valid & (u > 0) & (u < 1) & (v > 0) & (v < 1)
+
+    # (B, C, N*D) -> (C, B, N, D)
+    u = u.view(B, num_cams, num_query, D).permute(1, 0, 2, 3)
+    v = v.view(B, num_cams, num_query, D).permute(1, 0, 2, 3)
+    valid = valid.view(B, num_cams, num_query, D).permute(1, 0, 2, 3)
+    reference_points_cam = torch.stack([u, v], dim=-1)
+    return reference_points_cam, valid
+
+
 class BEVFormerLayer(nn.Module):
     """BEVFormer 单层编码器: deformable self-attn + cross-attn + FFN (pre-norm)"""
 
-    def __init__(self, embed_dims, num_heads, num_levels, num_points, dropout, ffn_channels, num_cams):
+    def __init__(self, embed_dims, num_heads, num_levels, num_points, dropout, ffn_channels,
+                 num_cams, cross_attn_impl='vectorized', len_bucket=0, cam_grouping=True):
         super().__init__()
         self.self_attn = MSDeformableAttention3D(
             embed_dims=embed_dims, num_heads=num_heads,
@@ -113,7 +156,8 @@ class BEVFormerLayer(nn.Module):
         self.cross_attn = SpatialCrossAttention(
             embed_dims=embed_dims, num_cams=num_cams,
             dropout=dropout, batch_first=True,
-            deformable_attention=ms_deform_attn)
+            deformable_attention=ms_deform_attn,
+            impl=cross_attn_impl, len_bucket=len_bucket, cam_grouping=cam_grouping)
         self.norm2 = nn.LayerNorm(embed_dims)
 
         self.ffn = nn.Sequential(
@@ -175,6 +219,10 @@ class BEVFormerEncoder(nn.Module):
         self.num_feat_levels = cfg.num_feat_levels
         self.img_h = cfg.img_h
         self.img_w = cfg.img_w
+        self.point_sampling_impl = cfg.get('point_sampling_impl', 'vectorized')
+        cross_attn_impl = cfg.get('cross_attn_impl', 'vectorized')
+        len_bucket = int(cfg.get('cross_attn_len_bucket', 0))
+        cam_grouping = bool(cfg.get('cross_attn_cam_grouping', True))
 
         self.bev_embed = nn.Embedding(self.bev_h * self.bev_w, self.embed_dims)
         self.bev_pos = nn.Embedding(self.bev_h * self.bev_w, self.embed_dims)
@@ -189,7 +237,10 @@ class BEVFormerEncoder(nn.Module):
                 num_points=cfg.num_sampling_points,
                 dropout=cfg.dropout,
                 ffn_channels=cfg.ffn_channels,
-                num_cams=self.num_cams) for _ in range(cfg.num_layers)
+                num_cams=self.num_cams,
+                cross_attn_impl=cross_attn_impl,
+                len_bucket=len_bucket,
+                cam_grouping=cam_grouping) for _ in range(cfg.num_layers)
         ])
 
         self.input_proj = nn.Sequential(
@@ -197,6 +248,19 @@ class BEVFormerEncoder(nn.Module):
             nn.BatchNorm2d(self.embed_dims),
             nn.ReLU(inplace=True),
         )
+
+        # 缓存 BEV 参考点 (persistent=False, 不影响旧 checkpoint)
+        Z = self.pc_range[5] - self.pc_range[2]
+        self.register_buffer(
+            '_ref_3d',
+            get_reference_points(self.bev_h, self.bev_w, Z, self.num_points_in_pillar,
+                                 dim='3d', bs=1, device='cpu', dtype=torch.float32),
+            persistent=False)
+        self.register_buffer(
+            '_ref_2d',
+            get_reference_points(self.bev_h, self.bev_w, dim='2d', bs=1,
+                                 device='cpu', dtype=torch.float32),
+            persistent=False)
 
         self.debug_dir = None
 
@@ -256,16 +320,18 @@ class BEVFormerEncoder(nn.Module):
         bev_queries = self.bev_embed.weight.unsqueeze(1).repeat(1, B, 1).to(dtype)
         # (num_query, B, embed_dims)
 
-        # 3. 生成3D参考点并投影到相机
-        Z = self.pc_range[5] - self.pc_range[2]
-        ref_3d = get_reference_points(
-            self.bev_h, self.bev_w, Z, self.num_points_in_pillar,
-            dim='3d', bs=B, device=device, dtype=dtype)
+        # 3. 生成3D参考点并投影到相机 (参考点已缓存, 这里只做 expand)
+        ref_3d = self._ref_3d.to(device=device, dtype=dtype).expand(B, -1, -1, -1)
         # (B, D, num_query, 3)
 
-        reference_points_cam, bev_mask = point_sampling(
-            ref_3d, self.pc_range, intrinsics, extrinsics,
-            self.img_h, self.img_w)
+        if self.point_sampling_impl == 'legacy':
+            reference_points_cam, bev_mask = point_sampling(
+                ref_3d, self.pc_range, intrinsics, extrinsics,
+                self.img_h, self.img_w)
+        else:
+            reference_points_cam, bev_mask = point_sampling_vectorized(
+                ref_3d, self.pc_range, intrinsics, extrinsics,
+                self.img_h, self.img_w)
         # (num_cams, B, num_query, D, 2), (num_cams, B, num_query, D)
 
         if self.debug_dir is not None:
@@ -273,8 +339,7 @@ class BEVFormerEncoder(nn.Module):
 
         # 4. BEV 位置编码 + 2D 参考点
         bev_pos_embed = self.bev_pos.weight.unsqueeze(0).expand(B, -1, -1).to(dtype)
-        ref_2d = get_reference_points(
-            self.bev_h, self.bev_w, dim='2d', bs=B, device=device, dtype=dtype)
+        ref_2d = self._ref_2d.to(device=device, dtype=dtype).expand(B, -1, -1, -1)
 
         # 5. 编码层
         bev_query = bev_queries.permute(1, 0, 2).contiguous()

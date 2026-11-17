@@ -5,11 +5,18 @@ from torchvision.models import resnet50, ResNet50_Weights
 
 
 class ResNetBackbone(nn.Module):
-    def __init__(self, depth=50, pretrained=True):
+    def __init__(self, depth=50, pretrained=True, weights_path=''):
         super().__init__()
         if depth == 50:
-            weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
-            resnet = resnet50(weights=weights)
+            if pretrained and weights_path:
+                # 离线加载本地权重 (服务器无外网)
+                resnet = resnet50(weights=None)
+                state_dict = torch.load(weights_path, map_location='cpu')
+                state_dict = state_dict.get('state_dict', state_dict)
+                resnet.load_state_dict(state_dict)
+            else:
+                weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
+                resnet = resnet50(weights=weights)
         else:
             raise ValueError(f'Unsupported backbone depth: {depth}')
 
@@ -84,7 +91,8 @@ class Backbone(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         if cfg.type == 'resnet':
-            self.img_backbone = ResNetBackbone(depth=cfg.depth, pretrained=True)
+            self.img_backbone = ResNetBackbone(
+                depth=cfg.depth, pretrained=True, weights_path=cfg.get('weights', ''))
         else:
             raise ValueError(f'Unsupported backbone type: {cfg.type}')
         

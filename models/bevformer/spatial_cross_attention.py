@@ -133,12 +133,16 @@ class SpatialCrossAttention(nn.Module):
     """跨空间交叉注意力: 每个相机只处理其可见的 BEV query (稀疏优化)"""
 
     def __init__(self, embed_dims=256, num_cams=6, dropout=0.1, batch_first=True,
-                 deformable_attention=None):
+                 deformable_attention=None, impl='vectorized', len_bucket=0,
+                 cam_grouping=True):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.embed_dims = embed_dims
         self.num_cams = num_cams
         self.batch_first = batch_first
+        self.impl = impl
+        self.len_bucket = int(len_bucket) if len_bucket else 0
+        self.cam_grouping = bool(cam_grouping)
 
         if deformable_attention is None:
             self.deformable_attention = MSDeformableAttention3D(
@@ -153,6 +157,139 @@ class SpatialCrossAttention(nn.Module):
 
     def forward(self, query, key, value, reference_points_cam=None,
                 bev_mask=None, spatial_shapes=None, level_start_index=None):
+        if self.impl == 'legacy':
+            return self._forward_legacy(query, key, value, reference_points_cam,
+                                        bev_mask, spatial_shapes, level_start_index)
+        if self.cam_grouping:
+            return self._forward_vectorized(query, key, value, reference_points_cam,
+                                            bev_mask, spatial_shapes, level_start_index)
+        return self._forward_vectorized_padded(query, key, value, reference_points_cam,
+                                               bev_mask, spatial_shapes, level_start_index)
+
+    def _get_indexes(self, bev_mask):
+        indexes = []
+        for mask_per_img in bev_mask:
+            indexes.append(mask_per_img[0].sum(-1).nonzero().squeeze(-1))
+        return indexes
+
+    def _forward_vectorized(self, query, key, value, reference_points_cam=None,
+                            bev_mask=None, spatial_shapes=None, level_start_index=None):
+        """向量化 + 按相机可见 query 数分组, 避免 padding 到 max_len 的浪费"""
+        bs, num_query, _ = query.size()
+        if reference_points_cam is None:
+            raise ValueError('reference_points_cam must be provided')
+
+        D = reference_points_cam.size(3)
+        indexes = self._get_indexes(bev_mask)
+
+        groups = {}
+        for cam, idx in enumerate(indexes):
+            n = int(idx.numel())
+            if n == 0:
+                continue
+            groups.setdefault(n, []).append(cam)
+        if not groups:
+            return query
+
+        slots = torch.zeros_like(query)
+        num_cams, l, bs_k, embed_dims = key.shape
+
+        for n, cams in groups.items():
+            n_pad = n
+            if self.len_bucket > 0:
+                n_pad = ((n + self.len_bucket - 1) // self.len_bucket) * self.len_bucket
+            g = len(cams)
+
+            queries_group = query.new_zeros([bs, g, n_pad, self.embed_dims])
+            ref_group = reference_points_cam.new_zeros([bs, g, n_pad, D, 2])
+            for j, cam in enumerate(cams):
+                idx = indexes[cam]
+                queries_group[:, j, :n] = query[:, idx]
+                ref_group[:, j, :n] = reference_points_cam[cam][:, idx]
+
+            key_g = key[cams].permute(2, 0, 1, 3).reshape(bs * g, l, self.embed_dims)
+            value_g = value[cams].permute(2, 0, 1, 3).reshape(bs * g, l, self.embed_dims)
+
+            q_out = self.deformable_attention(
+                query=queries_group.view(bs * g, n_pad, self.embed_dims),
+                value=value_g,
+                reference_points=ref_group.view(bs * g, n_pad, D, 2),
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+            ).view(bs, g, n_pad, self.embed_dims)
+
+            for j, cam in enumerate(cams):
+                idx = indexes[cam]
+                slots[:, idx] += q_out[:, j, :n]
+
+        count = bev_mask.sum(-1) > 0
+        count = count.permute(1, 2, 0).sum(-1)
+        count = torch.clamp(count, min=1.0)
+        slots = slots / count[..., None]
+        slots = self.output_proj(slots)
+        return self.dropout(slots) + query
+
+    def _forward_vectorized_padded(self, query, key, value, reference_points_cam=None,
+                                   bev_mask=None, spatial_shapes=None, level_start_index=None):
+        """向量化 rebatch/scatter: 所有相机 padding 到 max_len (旧实现, 保留用于 A/B)"""
+        bs, num_query, _ = query.size()
+        if reference_points_cam is None:
+            raise ValueError('reference_points_cam must be provided')
+
+        D = reference_points_cam.size(3)
+        indexes = self._get_indexes(bev_mask)
+
+        lens = []
+        for idx in indexes:
+            n = idx.numel()
+            if self.len_bucket > 0:
+                n = ((n + self.len_bucket - 1) // self.len_bucket) * self.len_bucket
+            lens.append(n)
+        max_len = max(lens) if lens else 0
+        if max_len == 0:
+            return query
+
+        queries_rebatch = query.new_zeros([bs, self.num_cams, max_len, self.embed_dims])
+        reference_points_rebatch = reference_points_cam.new_zeros(
+            [bs, self.num_cams, max_len, D, 2])
+
+        for cam, idx in enumerate(indexes):
+            n = idx.numel()
+            if n == 0:
+                continue
+            # index_select, 一次处理整个 batch
+            queries_rebatch[:, cam, :n] = query[:, idx]
+            reference_points_rebatch[:, cam, :n] = reference_points_cam[cam][:, idx]
+
+        num_cams, l, bs_k, embed_dims = key.shape
+        key_r = key.permute(2, 0, 1, 3).reshape(bs * self.num_cams, l, self.embed_dims)
+        value_r = value.permute(2, 0, 1, 3).reshape(bs * self.num_cams, l, self.embed_dims)
+
+        queries = self.deformable_attention(
+            query=queries_rebatch.view(bs * self.num_cams, max_len, self.embed_dims),
+            value=value_r,
+            reference_points=reference_points_rebatch.view(
+                bs * self.num_cams, max_len, D, 2),
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+        ).view(bs, self.num_cams, max_len, self.embed_dims)
+
+        slots = torch.zeros_like(query)
+        for cam, idx in enumerate(indexes):
+            n = idx.numel()
+            if n == 0:
+                continue
+            slots[:, idx] += queries[:, cam, :n]
+
+        count = bev_mask.sum(-1) > 0
+        count = count.permute(1, 2, 0).sum(-1)
+        count = torch.clamp(count, min=1.0)
+        slots = slots / count[..., None]
+        slots = self.output_proj(slots)
+        return self.dropout(slots) + query
+
+    def _forward_legacy(self, query, key, value, reference_points_cam=None,
+                        bev_mask=None, spatial_shapes=None, level_start_index=None):
         """
         query: (bs, num_query, embed_dims)  batch_first=True
         key, value: (num_cam, num_value, bs, embed_dims)

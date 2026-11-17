@@ -474,7 +474,7 @@ def infer():
     loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=2, collate_fn=collate_fn)
 
     model = MapTR(cfg.model).to(cfg.device)
-    ckpt = torch.load(args.checkpoint, map_location=cfg.device)
+    ckpt = torch.load(args.checkpoint, map_location='cpu')
     model.load_state_dict(ckpt['model_state_dict'], strict=False)
     model.eval()
     print(f'[加载] {args.checkpoint} epoch={ckpt.get("epoch", "?")}')

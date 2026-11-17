@@ -182,7 +182,7 @@ def main():
     with timer('模型加载'):
         model = MapTR(cfg.model).to(device)
         print(f'[模型] 加载 checkpoint: {args.checkpoint}')
-        checkpoint = torch.load(args.checkpoint, map_location=device)
+        checkpoint = torch.load(args.checkpoint, map_location='cpu')
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:

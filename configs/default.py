@@ -1,6 +1,20 @@
 import torch
 import copy
 
+try:
+    import torch_npu  # noqa: F401  注册 NPU 后端
+except ImportError:
+    pass
+
+
+def _select_device():
+    """自动选择训练设备: NPU > CUDA > CPU"""
+    if hasattr(torch, 'npu') and torch.npu.is_available():
+        return torch.device('npu:0')
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    return torch.device('cpu')
+
 
 class AttrDict(dict):
     def __getattr__(self, key):
@@ -25,7 +39,7 @@ def update_config(config, update_items):
 # ══════════════════════════════════════════════════
 
 # 基础配置
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = _select_device()
 num_cams = 6
 bev_h = 40
 bev_w = 80
@@ -78,6 +92,7 @@ model = AttrDict({
     'img_backbone': AttrDict({
         'type': 'resnet',
         'depth': 50,
+        'weights': '',   # 本地权重路径, 空=用 torchvision 默认(需外网或缓存)
         'fpn': AttrDict({
             'in_channels': [512, 1024, 2048],
             'out_channels': fpn_out_channels,
@@ -103,6 +118,12 @@ model = AttrDict({
         'num_sampling_points': 8,
         'dropout': 0.1,
         'ffn_channels': 512,
+
+        # 性能相关实现开关 (默认向量化, 与原实现数值等价)
+        'point_sampling_impl': 'vectorized',   # 'vectorized' | 'legacy'
+        'cross_attn_impl': 'vectorized',       # 'vectorized' | 'legacy'
+        'cross_attn_len_bucket': 0,            # 0=动态; >0 时长度向上对齐到桶
+        'cross_attn_cam_grouping': True,       # 按相机可见 query 数分组, 避免 padding 浪费
     }),
 
     'map_det_head': AttrDict({
@@ -198,6 +219,12 @@ config_default = AttrDict({
     # ── 评测 ──
     'score_thr': 0.3,
     'eval_thresholds': [0.5, 1.0, 1.5],
+
+    # ── 性能 / 兼容性开关 (默认关闭, 不影响原有训练行为) ──
+    'amp': False,              # 混合精度 (NPU/CUDA 自适应)
+    'amp_dtype': 'float16',    # 'float16' | 'bfloat16'
+    'npu_jit_compile': False,  # 仅 NPU: torch.npu.set_compile_mode(jit_compile=True)
+    'worker_num_threads': 1,   # DataLoader worker 内 torch 线程数 (两平台生效)
 })
 
 # 派生字段

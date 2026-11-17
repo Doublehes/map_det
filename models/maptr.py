@@ -30,30 +30,56 @@ class BEVTransform:
         self.x_center = x_center
         self.y_center = y_center
 
-    def flip_bev(self, bev_feat: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        if mask is not None and mask.any():
-            mask = mask.to(bev_feat.device)
-            bev_feat[mask] = bev_feat[mask].flip(dims=[-2])
-        return bev_feat
+    @staticmethod
+    def _as_list(val, B):
+        """把 list/tuple/标量/tensor 统一成 Python 列表 (tensor 仅兜底, 会同步一次)"""
+        if val is None:
+            return None
+        if isinstance(val, torch.Tensor):
+            return val.detach().reshape(-1).tolist()
+        if isinstance(val, (list, tuple)):
+            return list(val)
+        return [val] * B
+
+    @staticmethod
+    def _any_nonzero(vals) -> bool:
+        return vals is not None and any(abs(float(v)) > 1e-6 for v in vals)
+
+    def flip_bev(self, bev_feat: torch.Tensor, flip) -> torch.Tensor:
+        B = bev_feat.shape[0]
+        flags = self._as_list(flip, B)
+        if flags is None or not any(bool(f) for f in flags):
+            return bev_feat
+        mask = torch.tensor([bool(f) for f in flags], device=bev_feat.device,
+                            dtype=torch.bool).view(B, 1, 1, 1)
+        return torch.where(mask, bev_feat.flip(dims=[-2]), bev_feat)
 
     def _affine_transform(self, bev_feat: torch.Tensor,
-                          rot_angle: torch.Tensor = None,
-                          dx: torch.Tensor = None,
-                          dy: torch.Tensor = None) -> torch.Tensor:
-        B, C, H, W = bev_feat.shape
+                          rot_angle=None, dx=None, dy=None) -> torch.Tensor:
+        B = bev_feat.shape[0]
         device, dtype = bev_feat.device, bev_feat.dtype
 
-        if rot_angle is not None:
-            if rot_angle.dim() == 0:
-                rot_angle = rot_angle.expand(B)
-            assert rot_angle.shape == (B,)
-            c = torch.cos(rot_angle)
-            s = torch.sin(rot_angle)
-        else:
-            c, s = 1.0, 0.0
+        def _to_tensor(val):
+            vals = self._as_list(val, B)
+            if vals is None:
+                return None
+            t = torch.as_tensor(vals, device=device, dtype=dtype).reshape(-1)
+            if t.numel() == 1 and B > 1:
+                t = t.expand(B)
+            return t
 
-        tx = dx / self.half_x if dx is not None else 0.0
-        ty = dy / self.half_y if dy is not None else 0.0
+        rot = _to_tensor(rot_angle)
+        if rot is not None:
+            c = torch.cos(rot)
+            s = torch.sin(rot)
+        else:
+            c = torch.ones(B, device=device, dtype=dtype)
+            s = torch.zeros(B, device=device, dtype=dtype)
+
+        dx_t = _to_tensor(dx)
+        dy_t = _to_tensor(dy)
+        tx = dx_t / self.half_x if dx_t is not None else 0.0
+        ty = dy_t / self.half_y if dy_t is not None else 0.0
 
         theta = torch.zeros(B, 2, 3, device=device, dtype=dtype)
         theta[:, 0, 0] = c
@@ -66,15 +92,14 @@ class BEVTransform:
         grid = F.affine_grid(theta, bev_feat.shape, align_corners=False)
         return F.grid_sample(bev_feat, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
 
-    def transform_bev(self, bev_feat: torch.Tensor, flip: torch.Tensor = None,
-                       rot_angle: torch.Tensor = None,
-                       dx: torch.Tensor = None,
-                       dy: torch.Tensor = None) -> torch.Tensor:
+    def transform_bev(self, bev_feat: torch.Tensor, flip=None,
+                      rot_angle=None, dx=None, dy=None) -> torch.Tensor:
         bev_feat = self.flip_bev(bev_feat, flip)
+        B = bev_feat.shape[0]
         need_affine = (
-            (rot_angle is not None and rot_angle.abs().max() > 1e-6) or
-            (dx is not None and dx.abs().max() > 1e-6) or
-            (dy is not None and dy.abs().max() > 1e-6)
+            self._any_nonzero(self._as_list(rot_angle, B)) or
+            self._any_nonzero(self._as_list(dx, B)) or
+            self._any_nonzero(self._as_list(dy, B))
         )
         if need_affine:
             bev_feat = self._affine_transform(bev_feat, rot_angle, dx, dy)

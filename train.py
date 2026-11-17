@@ -21,6 +21,9 @@ from models.maptr import MapTR
 from eval import run_eval
 from torch.utils.tensorboard import SummaryWriter
 from utils.timer import Timer
+from utils.device import (
+    is_npu, synchronize, setup_worker_threads, amp_context, build_grad_scaler,
+)
 
 def _get_lr_str(optimizer):
     lrs = sorted(set(round(g['lr'], 8) for g in optimizer.param_groups))
@@ -81,7 +84,14 @@ def build_optimizer(model, cfg):
     return AdamW(param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
 
-def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None, global_step=0):
+def _worker_init_fn(num_threads):
+    def _init(_worker_id):
+        setup_worker_threads(num_threads)
+    return _init
+
+
+def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None,
+                    global_step=0, amp_enabled=False, amp_dtype='float16', scaler=None):
     model.train()
     total_loss = total_cls_loss = total_reg_loss = total_seg_loss = total_heatmap_loss = 0.0
     total_aux_cls_loss = total_aux_reg_loss = 0.0
@@ -97,17 +107,29 @@ def train_one_epoch(model, loader, optimizer, scheduler, epoch, cfg, writer=None
         extrinsics = batch['extrinsics'].to(cfg.device)
 
         t_model = time.time()
-        cls_scores, reg_preds, seg_preds, heatmap_pred, _ = model(imgs, intrinsics, extrinsics, batch=batch, return_all_layers=True)
+        with amp_context(cfg.device, amp_enabled, amp_dtype):
+            cls_scores, reg_preds, seg_preds, heatmap_pred, _ = model(
+                imgs, intrinsics, extrinsics, batch=batch, return_all_layers=True)
 
-        batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
+            batch_cpu = {k: v for k, v in batch.items() if k not in ['imgs', 'intrinsics', 'extrinsics']}
 
-        loss_dict = model.compute_loss(cls_scores, reg_preds, seg_preds, batch_cpu, heatmap_pred=heatmap_pred)
-        loss = sum(loss_dict.values())
+            loss_dict = model.compute_loss(
+                cls_scores, reg_preds, seg_preds, batch_cpu, heatmap_pred=heatmap_pred)
+            loss = sum(loss_dict.values())
 
         optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_max_norm)
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_max_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_max_norm)
+            optimizer.step()
+        if is_npu(cfg.device):
+            synchronize(cfg.device)   # NPU 异步执行, 计时前同步; CUDA 路径保持原样
         t_end = time.time()
 
         data_times.append(t_model - t_data)
@@ -195,7 +217,7 @@ def save_checkpoint(model, optimizer, epoch, cfg, save_dir, filename=None):
 
 def load_pretrained(model, checkpoint_path, cfg, freeze_backbone=False):
     print(f'[预训练] 加载: {checkpoint_path}')
-    ckpt = torch.load(checkpoint_path, map_location=cfg.device)
+    ckpt = torch.load(checkpoint_path, map_location='cpu')
     state_dict = ckpt.get('model_state_dict', ckpt)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
@@ -228,9 +250,19 @@ def main():
     # 保存解析后的完整配置 (含继承字段) 到工作目录
     dump_config(cfg, args.config, cfg.work_dir)
 
+    if cfg.device.type == 'npu':
+        torch.npu.set_device(cfg.device)
     print(f'[设备] {cfg.device}')
     print(f'[配置] num_epochs={cfg.num_epochs}, batch_size={cfg.data.batch_size}')
     print(f'[数据] train={cfg.data.train_ann_file}')
+
+    # heatmap head 关闭时跳过软热力图计算 (减少 CPU 开销)
+    heatmap_head = cfg.model.get('heatmap_head')
+    cfg.data.compute_heatmap = bool(heatmap_head is not None and heatmap_head.get('enabled', True))
+
+    if is_npu(cfg.device) and cfg.get('npu_jit_compile', False):
+        torch.npu.set_compile_mode(jit_compile=True)
+        print('[NPU] 已开启 jit_compile 图模式')
 
     train_dataset = MapTRDataset(
         ann_file=cfg.data.train_ann_file,
@@ -246,6 +278,8 @@ def main():
         is_train=False,
     )
 
+    worker_init = _worker_init_fn(int(cfg.get('worker_num_threads', 1)))
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=cfg.data.batch_size,
@@ -253,6 +287,7 @@ def main():
         num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         drop_last=True,
+        worker_init_fn=worker_init,
     )
 
     val_loader = DataLoader(
@@ -262,6 +297,7 @@ def main():
         num_workers=cfg.data.num_workers,
         collate_fn=collate_fn,
         drop_last=False,
+        worker_init_fn=worker_init,
     )
 
     model = MapTR(cfg.model).to(cfg.device)
@@ -306,7 +342,7 @@ def main():
 
     if cfg.resume and os.path.exists(cfg.resume):
         print(f'[恢复] 从 {cfg.resume} 恢复训练')
-        checkpoint = torch.load(cfg.resume, map_location=cfg.device)
+        checkpoint = torch.load(cfg.resume, map_location='cpu')
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
@@ -315,13 +351,20 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'[模型] 总参数: {total_params/1e6:.2f}M, 可训练: {trainable_params/1e6:.2f}M')
 
+    amp_enabled = bool(cfg.get('amp', False))
+    amp_dtype = cfg.get('amp_dtype', 'float16')
+    scaler = build_grad_scaler(cfg.device, amp_enabled, amp_dtype)
+    if amp_enabled:
+        print(f'[AMP] 已开启 dtype={amp_dtype}, grad_scaler={scaler is not None}')
+
     writer = SummaryWriter(log_dir=os.path.join(cfg.work_dir, 'logs'))
     timer = Timer()
     global_step = 0
     for epoch in range(start_epoch, cfg.num_epochs):
         train_loss, global_step = train_one_epoch(
             model, train_loader, optimizer, scheduler, epoch, cfg,
-            writer=writer, global_step=global_step)
+            writer=writer, global_step=global_step,
+            amp_enabled=amp_enabled, amp_dtype=amp_dtype, scaler=scaler)
         
         save_checkpoint(model, optimizer, epoch, cfg, cfg.work_dir, filename='latest.pth')
         if (epoch + 1) % cfg.checkpoint_interval == 0:

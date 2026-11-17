@@ -214,7 +214,7 @@ class MapTRHead(nn.Module):
                     cls_scores_main_list.append(cls_all[:, :num_q_main])
                     cls_scores_aux_list.append(cls_all[:, num_q_main:])
                     reg_preds_main_list.append(reg_all[:, :num_q_main])
-                    reg_preds_aux_list.append(reg_all[:, num_q_aux:])
+                    reg_preds_aux_list.append(reg_all[:, num_q_main:])
                 else:
                     cls_scores_main_list.append(cls_all[:, :num_q_main])
                     cls_scores_aux_list.append(None)
