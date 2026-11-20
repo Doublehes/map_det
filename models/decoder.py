@@ -5,6 +5,14 @@ import torch.nn.functional as F
 from .deformable_attn import CustomMSDeformableAttention
 
 
+def inverse_sigmoid(x, eps=1e-5):
+    """Inverse of sigmoid, numerically safe (same as mmdet)."""
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1 / x2)
+
+
 class FFN(nn.Module):
     def __init__(self, embed_dims, ffn_channels, dropout=0.1):
         super().__init__()
@@ -253,6 +261,7 @@ class MapTransformerDecoder(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.y_flip = getattr(cfg, 'y_flip', True)
+        self.predict_refine = getattr(cfg, 'predict_refine', False)
         self.layers = nn.ModuleList([
             MapTransformerLayer(cfg) for _ in range(cfg.num_decoder_layers)
         ])
@@ -290,7 +299,12 @@ class MapTransformerDecoder(nn.Module):
                 reg_points = reg_branches[lid](output.permute(1, 0, 2))
                 bs, num_q, np2 = reg_points.shape
                 reg_points = reg_points.view(bs, num_q, np2 // 2, 2)
-                new_reference_points = reg_points.sigmoid()
+                if self.predict_refine:
+                    new_reference_points = (
+                        reg_points + inverse_sigmoid(reference_points)
+                    ).sigmoid()
+                else:
+                    new_reference_points = reg_points.sigmoid()
                 reference_points = new_reference_points.clone().detach()
             else:
                 new_reference_points = reference_points

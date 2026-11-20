@@ -1,13 +1,31 @@
+import copy
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .decoder import MapTransformerDecoder
+from .decoder import MapTransformerDecoder, inverse_sigmoid
 from .losses import (
     HungarianMatcher, focal_loss, l1_loss, one_to_many_match,
     MaskFocalLoss, MaskDiceLoss, HeatmapLoss,
 )
+
+
+def _build_line_anchor_logits(num_queries, num_points, device, dtype):
+    """Deterministic straight-line grid, returned as logits (Q, 2P)."""
+    x = torch.linspace(0.01, 0.99, num_points, device=device, dtype=dtype)
+    ny = min(4, num_queries)
+    ns = int(math.ceil(num_queries / ny))
+    y0s = torch.linspace(0.15, 0.85, ny, device=device, dtype=dtype)
+    slopes = torch.linspace(-0.6, 0.6, ns, device=device, dtype=dtype)
+    anchors = []
+    for y0 in y0s:
+        for slope in slopes:
+            y = (y0 + slope * x).clamp(0.01, 0.99)
+            anchors.append(torch.stack([x, y], dim=-1))
+    anchors = torch.stack(anchors, dim=0)[:num_queries]  # (Q, P, 2)
+    assert anchors.shape[0] == num_queries
+    return inverse_sigmoid(anchors).flatten(1)
 
 
 class SinePositionalEncoding(nn.Module):
@@ -83,8 +101,18 @@ class MapTRHead(nn.Module):
             self.bev_feat_net = nn.Sequential(*blocks)
 
         # query
+        self.ref_init_mode = cfg.get('ref_init', 'mlp')
         self.query_embedding = nn.Embedding(self.num_queries, self.embed_dims)
-        self.reference_points_embed = nn.Linear(self.embed_dims, self.num_points * 2)
+        if self.ref_init_mode in ('learnable', 'line'):
+            self.reference_points = nn.Parameter(
+                torch.empty(self.num_queries, self.num_points * 2))
+        elif self.ref_init_mode == 'mlp':
+            self.reference_points_embed = nn.Linear(
+                self.embed_dims, self.num_points * 2)
+        else:
+            raise ValueError(
+                f"Unsupported ref_init: {self.ref_init_mode} "
+                "(expected 'mlp', 'learnable' or 'line')")
 
         # One-to-Many 辅助 Query
         self.num_aux_queries = cfg.get('one2many_num_aux_queries', 0)
@@ -92,12 +120,17 @@ class MapTRHead(nn.Module):
         self.one2many_loss_weight = cfg.get('one2many_loss_weight', 1.0)
         if self.num_aux_queries > 0:
             self.aux_query_embedding = nn.Embedding(self.num_aux_queries, self.embed_dims)
-            self.aux_ref_points_embed = nn.Linear(self.embed_dims, self.num_points * 2)
+            if self.ref_init_mode in ('learnable', 'line'):
+                self.aux_reference_points = nn.Parameter(
+                    torch.empty(self.num_aux_queries, self.num_points * 2))
+            else:
+                self.aux_ref_points_embed = nn.Linear(
+                    self.embed_dims, self.num_points * 2)
 
         # decoder
         self.transformer = MapTransformerDecoder(cfg)
 
-        # prediction heads (one per decoder layer, shared since different_heads=False)
+        # prediction heads (one per decoder layer; shared unless different_heads=True)
         cls_branch = nn.Linear(self.embed_dims, self.num_classes)
         reg_branch = nn.Sequential(
             nn.Linear(self.embed_dims, self.embed_dims * 2),
@@ -109,8 +142,15 @@ class MapTRHead(nn.Module):
             nn.Linear(self.embed_dims * 2, self.num_points * 2),
         )
         num_layers = cfg.num_decoder_layers
-        self.cls_branches = nn.ModuleList([cls_branch for _ in range(num_layers)])
-        self.reg_branches = nn.ModuleList([reg_branch for _ in range(num_layers)])
+        self.different_heads = cfg.get('different_heads', False)
+        if self.different_heads:
+            self.cls_branches = nn.ModuleList(
+                [copy.deepcopy(cls_branch) for _ in range(num_layers)])
+            self.reg_branches = nn.ModuleList(
+                [copy.deepcopy(reg_branch) for _ in range(num_layers)])
+        else:
+            self.cls_branches = nn.ModuleList([cls_branch for _ in range(num_layers)])
+            self.reg_branches = nn.ModuleList([reg_branch for _ in range(num_layers)])
 
         # 损失: Hungarian 匹配 + 分类/回归损失参数
         self.matcher = HungarianMatcher(
@@ -136,6 +176,18 @@ class MapTRHead(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+
+        if self.ref_init_mode == 'line':
+            with torch.no_grad():
+                self.reference_points.copy_(_build_line_anchor_logits(
+                    self.num_queries, self.num_points,
+                    self.reference_points.device, self.reference_points.dtype))
+                if self.num_aux_queries > 0:
+                    self.aux_reference_points.copy_(_build_line_anchor_logits(
+                        self.num_aux_queries, self.num_points,
+                        self.aux_reference_points.device,
+                        self.aux_reference_points.dtype))
+
         # focal loss bias init: 初始预测概率 ≈ 0.01
         bias_init = math.log(0.01 / 0.99)
         for m in self.cls_branches:
@@ -175,13 +227,21 @@ class MapTRHead(nn.Module):
 
         # 3. Query + reference points
         query_main = self.query_embedding.weight.unsqueeze(1).repeat(1, bs, 1)  # (num_q, B, embed_dims)
-        ref_points_main = self.reference_points_embed(query_main.permute(1, 0, 2)).sigmoid()
-        ref_points_main = ref_points_main.view(bs, self.num_queries, self.num_points, 2)
+        if self.ref_init_mode in ('learnable', 'line'):
+            ref_logits_main = self.reference_points.unsqueeze(0).expand(bs, -1, -1)
+        else:
+            ref_logits_main = self.reference_points_embed(query_main.permute(1, 0, 2))
+        ref_points_main = ref_logits_main.sigmoid().reshape(
+            bs, self.num_queries, self.num_points, 2)
 
         if self.training and self.num_aux_queries > 0:
             query_aux = self.aux_query_embedding.weight.unsqueeze(1).repeat(1, bs, 1)
-            ref_points_aux = self.aux_ref_points_embed(query_aux.permute(1, 0, 2)).sigmoid()
-            ref_points_aux = ref_points_aux.view(bs, self.num_aux_queries, self.num_points, 2)
+            if self.ref_init_mode in ('learnable', 'line'):
+                ref_logits_aux = self.aux_reference_points.unsqueeze(0).expand(bs, -1, -1)
+            else:
+                ref_logits_aux = self.aux_ref_points_embed(query_aux.permute(1, 0, 2))
+            ref_points_aux = ref_logits_aux.sigmoid().reshape(
+                bs, self.num_aux_queries, self.num_points, 2)
 
             query = torch.cat([query_main, query_aux], dim=0)
             ref_points = torch.cat([ref_points_main, ref_points_aux], dim=1)

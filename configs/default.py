@@ -139,6 +139,11 @@ model = AttrDict({
         'dropout': 0.1,
         'ffn_channels': 512,
 
+        # 解码头参考点 / head 结构开关
+        'ref_init': 'mlp',          # 'mlp' | 'learnable' | 'line'（直线 grid 初始化 + 可学习）
+        'predict_refine': False,    # False=绝对回归(现状); True=delta 细化(类 MapTR)
+        'different_heads': False,   # False=各层共享 cls/reg head; True=每层独立
+
         'bev_feat_net': AttrDict({
             'enabled': False,     # 默认关闭, 需显式开启
             'type': 'residual',   # 目前仅支持 residual

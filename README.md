@@ -236,14 +236,14 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 
 ## 6. TODO / 待办
 
-> 状态：方案已确认，等待实验结束后实现；当前只记录设计，不改代码。
+> 状态：代码已实现，默认行为保持不变；等待 A/B 实验。
 > 最后更新：2026-11-18
 
 | 子项 | 状态 | 备注 |
 |---|---|---|
-| 6.1 delta refinement | 待实现 | 方案 1 |
-| 6.2 learnable initial ref points | 待实现 | 方案 2 |
-| 6.3 组合方案与 A/B 实验 | 待实现 | 主实验 |
+| 6.1 delta refinement | 已实现 | 方案 1 |
+| 6.2 learnable initial ref points | 已实现 | 方案 2 |
+| 6.3 组合方案与 A/B 实验 | 已实现，待实验 | 主实验 |
 
 ### 6.1 解码头迭代细化（delta refinement）
 
@@ -277,10 +277,11 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
   - 按 `different_heads` 选择共享 module 或 `copy.deepcopy` 每层独立 head。
   - 更新相关注释；`init_weights` 逻辑无需改。
   - `reference_points_embed` 在 `ref_init='learnable'` 时替换为 `nn.Parameter`（详见 6.2）。
-- 新增 A/B 配置（实现时创建）
-  - `configs_4090/stage2_joint_e72_arg_d3_refine.py`（`predict_refine=True`）
-  - 可选 `configs_4090/stage2_joint_e72_arg_d3_refine_dh.py`（再开 `different_heads=True`）
-  - 可选单层 smoke：`configs_4090/stage2_joint_e72_arg_refine_l1.py`
+- 新增 A/B 配置（已创建，基于 `stage2_joint_freeze_ec2_e72_d3.py`）
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_learnable.py`
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_refine.py`
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_learnable_refine.py`
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_learnable_refine_dh.py`
 
 #### 验证计划
 - 恒等性：reg 输出置零时 `new_ref == ref_last`（delta 模式）。
@@ -328,10 +329,10 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 ```
 
 #### 代码改动点
-- `models/head.py:86-87`：按 `ref_init` 条件创建 `reference_points` 或 `reference_points_embed`。
-- `models/head.py:93-95`：aux query 同理（`aux_reference_points` / `aux_ref_points_embed`）。
-- `models/head.py:135-143`：xavier 由现有通用循环覆盖，无需额外逻辑。
-- `models/head.py:176-190`：forward 走 learnable 分支：
+- `models/head.py:87-99`：按 `ref_init` 条件创建 `reference_points` 或 `reference_points_embed`。
+- `models/head.py:103-110`：aux query 同理（`aux_reference_points` / `aux_ref_points_embed`）。
+- `models/head.py:158-166`：xavier 由现有通用循环覆盖，无需额外逻辑。
+- `models/head.py:199-213`：forward 走 learnable 分支：
 
   ```python
   if self.ref_init_mode == 'learnable':
