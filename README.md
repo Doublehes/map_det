@@ -231,3 +231,148 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 | 等价性检查 | `python tools/check_equiv.py --device cpu` |
 | NPU 单步分解 | `python tools/profile_step.py --config configs_npu/stage1.py` |
 | NPU 算子 profiling | `python tools/profile_ops.py --config configs_npu/stage1.py` |
+
+---
+
+## 6. TODO / 待办
+
+> 状态：方案已确认，等待实验结束后实现；当前只记录设计，不改代码。
+> 最后更新：2026-11-18
+
+| 子项 | 状态 | 备注 |
+|---|---|---|
+| 6.1 delta refinement | 待实现 | 方案 1 |
+| 6.2 learnable initial ref points | 待实现 | 方案 2 |
+| 6.3 组合方案与 A/B 实验 | 待实现 | 主实验 |
+
+### 6.1 解码头迭代细化（delta refinement）
+
+> 设计目标：在不改变默认行为的前提下，增加 MapTR/Deformable-DETR 风格的
+> reference point 迭代细化，并支持共享/独立 reg head 的 A/B 对比。
+
+#### 方案
+- 采用方案 A（与 MapTR 原版一致）：
+  `new_ref = sigmoid(inverse_sigmoid(ref_last) + reg_branch(output_l))`
+- 默认 `predict_refine=False`，保持现有“绝对回归”行为不变。
+- 默认 `different_heads=False`（各层共享 reg/cls head，与上游 MapTracker 配置一致）。
+- delta 累加在 canonical（未 y_flip）归一化坐标的 logit 空间；`y_flip` 只作用于
+  传给 cross-attn 的临时 ref。
+- 保留 `reference_points = new_ref.clone().detach()`，配合 `aux_loss=True` 做逐层监督。
+- 与 6.2 的可学习初始 ref 组合使用时，delta 从可学习参数出发；组合实验见 6.3。
+
+#### 配置项（`configs/default.py` 的 `map_det_head`）
+```python
+'ref_init': 'mlp',          # 'mlp' | 'learnable'，详见 6.2
+'predict_refine': False,    # False=绝对回归(现状); True=delta 细化(类 MapTR)
+'different_heads': False,   # False=各层共享 cls/reg head; True=每层独立
+```
+
+#### 代码改动点
+- `models/decoder.py`
+  - 新增 `inverse_sigmoid(x, eps=1e-5)`（mmdet 风格 clamp 实现）。
+  - `MapTransformerDecoder.__init__` 读取 `predict_refine`。
+  - `forward` 的 reg 分支增加 delta 逻辑；`predict_refine=False` 路径保持逐位一致。
+- `models/head.py`
+  - 新增 `import copy`。
+  - 按 `different_heads` 选择共享 module 或 `copy.deepcopy` 每层独立 head。
+  - 更新相关注释；`init_weights` 逻辑无需改。
+  - `reference_points_embed` 在 `ref_init='learnable'` 时替换为 `nn.Parameter`（详见 6.2）。
+- 新增 A/B 配置（实现时创建）
+  - `configs_4090/stage2_joint_e72_arg_d3_refine.py`（`predict_refine=True`）
+  - 可选 `configs_4090/stage2_joint_e72_arg_d3_refine_dh.py`（再开 `different_heads=True`）
+  - 可选单层 smoke：`configs_4090/stage2_joint_e72_arg_refine_l1.py`
+
+#### 验证计划
+- 恒等性：reg 输出置零时 `new_ref == ref_last`（delta 模式）。
+- logit 往返：`inverse_sigmoid(x).sigmoid() ≈ x`，0/1 边界不产生 inf/nan。
+- 默认路径回归：`predict_refine=False` 前向输出与改动前一致。
+- d3 A/B（固定 seed / batch / lr）：
+
+  | run | predict_refine | different_heads |
+  |---|---|---|
+  | baseline | False | False |
+  | delta | True | False |
+  | delta + indep（可选） | True | True |
+
+  对比逐层 `reg_loss` 曲线、收敛速度、最终 mAP@0.5/1.0/1.5。
+- 单层 smoke：`num_decoder_layers=1, predict_refine=True` 跑 1–2 epoch。
+- A/B 期间保持 `amp=False`，避免 seg-head fp16 NaN 干扰。
+
+#### 兼容性注意
+- `predict_refine=True` 时 reg head 语义由“绝对坐标”变为“logit 偏移”；
+  从 stage1 启动没问题（stage1 检测头关闭），但不要直接 resume 旧的
+  “绝对回归” stage2 检测头，需丢弃 `head.*` 权重或重新训练。
+- `different_heads=True` 可用旧共享 checkpoint 初始化（各层复制同一初值）；
+  反向（独立 → 共享）不推荐。
+
+### 6.2 可学习初始 reference points（learnable ref init）
+
+> 方案 2：不做 anchor、不做曲线拟合，直接把初始 reference points 做成每个 query
+> 独立的可学习参数，并替换掉 `MLP(query)`；默认关闭，保持现状。
+
+#### 最终决策
+
+| 项 | 决策 |
+|---|---|
+| 参数化 | `nn.Parameter(num_queries, num_points * 2)`，存 logits |
+| 初始化 | xavier（复用 `init_weights` 的通用循环） |
+| 是否替换 MLP | 替换 `reference_points_embed` |
+| anchor | 不做 |
+| 曲线 / 二次项 | 不做 |
+| aux query | 同样替换为 `aux_reference_points` |
+| 默认值 | `ref_init='mlp'`，不改变现有行为 |
+
+#### 配置项（`configs/default.py` 的 `map_det_head`）
+```python
+'ref_init': 'mlp',   # 'mlp' = 现状; 'learnable' = 直接可学习 ref points
+```
+
+#### 代码改动点
+- `models/head.py:86-87`：按 `ref_init` 条件创建 `reference_points` 或 `reference_points_embed`。
+- `models/head.py:93-95`：aux query 同理（`aux_reference_points` / `aux_ref_points_embed`）。
+- `models/head.py:135-143`：xavier 由现有通用循环覆盖，无需额外逻辑。
+- `models/head.py:176-190`：forward 走 learnable 分支：
+
+  ```python
+  if self.ref_init_mode == 'learnable':
+      ref_logits_main = self.reference_points.unsqueeze(0).expand(bs, -1, -1)
+  else:
+      ref_logits_main = self.reference_points_embed(query_main.permute(1, 0, 2))
+  ref_points_main = ref_logits_main.sigmoid().reshape(
+      bs, self.num_queries, self.num_points, 2)
+  ```
+
+  注意用 `reshape` 而不是 `view`（`expand` 后可能非连续）。
+
+#### 验证
+- `reference_points` 形状 `(num_queries, num_points*2)`，且 `reference_points_embed` 不存在。
+- xavier 后 logits 标准差约 0.17，32 个 query 的初始 ref 互不相同。
+- `ref_init='mlp'` 路径与改动前逐位一致。
+- `predict_refine=True` 时，把 reg 输出置零，`new_ref ≈ ref_last`。
+- 初始 `ref_0` 仍接近中心一团（无 anchor，预期内）；训练中监控 ref_0 覆盖度是否提升。
+
+### 6.3 组合方案与 A/B 实验
+
+#### 实验矩阵（1 层与 d3 都跑）
+
+| run | ref_init | predict_refine | different_heads | 目的 |
+|---|---|---|---|---|
+| baseline | mlp | False | False | 现状 |
+| learnable | learnable | False | False | 参数化解耦 |
+| delta only | mlp | True | False | 无 anchor 的 delta |
+| learnable + delta | learnable | True | False | 主目标 |
+| learnable + delta + indep（可选） | learnable | True | True | head 独立性 |
+
+#### 实验顺序
+1. 1 层配置：`learnable` vs `mlp`。
+2. 1 层配置：`learnable + delta` vs `mlp + delta`。
+3. d3 配置：完整矩阵。
+4. 可选：`different_heads=True` 单独 ablation。
+
+#### 指标
+- 早期 epoch 的逐层 `reg_loss` 与收敛速度。
+- 最终 mAP@0.5/1.0/1.5。
+- 端点误差、弯线子集指标。
+- 每几个 epoch 计算一次 `ref_0` 覆盖度（GT 点到 ref polyline 的最小距离）。
+
+固定 seed / batch / lr，一次只改一个开关。

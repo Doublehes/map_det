@@ -20,7 +20,7 @@ config_default.model.map_det_head.bev_feat_net.enabled = True
 config_default.freeze_modules = ['backbone.', 'bev_encoder.', 'seg_head.', 'heatmap_head.']
 
 # ── 数据 ──
-config_default.data.batch_size = 8
+config_default.data.batch_size = 16
 # config_default.data.bev_flip_prob = 0.5
 # config_default.data.bev_rot_angle = 10.0
 # config_default.data.bev_trans_x = 0.0
@@ -28,6 +28,6 @@ config_default.data.batch_size = 8
 
 # ── 训练入口 ──
 config_default.work_dir = ''
-config_default.pretrained = './work_dirs/stage1_seg_pretrain_e36_arg/latest.pth'
+config_default.pretrained = './work_dirs/stage1_seg_pretrain_e72_arg/latest.pth'
 config_default.freeze_backbone = False
 config_default.num_epochs = 72
