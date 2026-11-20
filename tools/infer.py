@@ -581,10 +581,10 @@ def infer():
                         gt_raw, pred_lines, cam_names,
                         start_y=ph + gap, cam_w=cw, cam_h=ch, gap=gap)
 
-        flip_flag = batch['flip'][0].item() if 'flip' in batch else False
-        rot_deg = np.degrees(batch['rot_angle'][0].item())
-        dx_val = batch['dx'][0].item() if 'dx' in batch else 0.0
-        dy_val = batch['dy'][0].item() if 'dy' in batch else 0.0
+        flip_flag = batch['flip'][0] if 'flip' in batch else False
+        rot_deg = np.degrees(batch['rot_angle'][0])
+        dx_val = batch['dx'][0] if 'dx' in batch else 0.0
+        dy_val = batch['dy'][0] if 'dy' in batch else 0.0
 
         # 热力图 (仅 heatmap head 启用时)
         result = canvas

@@ -148,7 +148,9 @@ def main():
     parser.add_argument('--batch-size', type=int, default=None, help='推理 batch size')
     parser.add_argument('--num-workers', type=int, default=None, help='dataloader workers')
     parser.add_argument('--device', type=str, default=None, help='推理设备')
-    parser.add_argument('--output-dir', type=str, default="./work_dirs/eval", help='PR 曲线保存目录')
+    parser.add_argument('--output_dir', type=str, default="./work_dirs/eval", help='PR 曲线保存目录')
+    parser.add_argument('--data_root', type=str, default=None, help='数据根目录')
+    parser.add_argument('--val_ann_file', type=str, default=None, help='val ann 文件路径')
     args = parser.parse_args()
 
     from configs.loader import load_config
@@ -157,6 +159,8 @@ def main():
     device = torch.device(args.device) if args.device else cfg.device
     score_thr = args.score_thr if args.score_thr is not None else cfg.score_thr
     batch_size = args.batch_size if args.batch_size else cfg.data.batch_size
+    cfg.data.data_root = args.data_root if args.data_root else cfg.data.data_root
+    cfg.data.val_ann_file = args.val_ann_file if args.val_ann_file else cfg.data.val_ann_file
 
     print(f'[设备] {device}')
     print(f'[score_thr] {score_thr}')
@@ -200,6 +204,11 @@ def main():
         plot_pr_curves(evaluator._pr_data, evaluator.id2cat, evaluator.thresholds,
                        save_dir=out_dir)
         print(f'[PR曲线] 已保存至 {out_dir}')
+
+        import json
+        with open(out_dir / 'results.json', 'w') as f:
+            json.dump(results, f, indent=4)
+        print(f'[结果] 已保存至 {out_dir / "results.json"}')
 
     return results
 
