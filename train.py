@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import random
 import argparse
 import pprint
 import numpy as np
@@ -28,6 +29,17 @@ from utils.device import (
 def _get_lr_str(optimizer):
     lrs = sorted(set(round(g['lr'], 8) for g in optimizer.param_groups))
     return 'lr=' + ', '.join(f'{lr:.2e}' for lr in lrs)
+
+
+def set_seed(seed):
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, 'npu') and torch.npu.is_available():
+        torch.npu.manual_seed_all(seed)
 
 
 def _to_plain(obj):
@@ -84,9 +96,14 @@ def build_optimizer(model, cfg):
     return AdamW(param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
 
 
-def _worker_init_fn(num_threads):
-    def _init(_worker_id):
+def _worker_init_fn(num_threads, seed=None):
+    def _init(worker_id):
         setup_worker_threads(num_threads)
+        if seed is not None:
+            worker_seed = int(seed) + worker_id
+            random.seed(worker_seed)
+            np.random.seed(worker_seed)
+            torch.manual_seed(worker_seed)
     return _init
 
 
@@ -242,6 +259,11 @@ def main():
     from configs.loader import load_config
     cfg = load_config(args.config)
 
+    seed = cfg.get('seed')
+    if seed is not None:
+        set_seed(int(seed))
+        print(f'[seed] {int(seed)}')
+
     # 未指定 work_dir 时, 以配置文件名为 work_dir
     if not cfg.work_dir:
         cfg.work_dir = os.path.join('./work_dirs', Path(args.config).stem)
@@ -278,7 +300,13 @@ def main():
         is_train=False,
     )
 
-    worker_init = _worker_init_fn(int(cfg.get('worker_num_threads', 1)))
+    worker_init = _worker_init_fn(
+        int(cfg.get('worker_num_threads', 1)), cfg.get('seed'))
+
+    generator = None
+    if cfg.get('seed') is not None:
+        generator = torch.Generator()
+        generator.manual_seed(int(cfg.seed))
 
     train_loader = DataLoader(
         train_dataset,
@@ -288,6 +316,7 @@ def main():
         collate_fn=collate_fn,
         drop_last=True,
         worker_init_fn=worker_init,
+        generator=generator,
     )
 
     val_loader = DataLoader(

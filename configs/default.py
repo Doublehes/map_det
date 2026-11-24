@@ -168,6 +168,7 @@ model = AttrDict({
 
         # SGQ 架构开关 (False=原版MapTR, True=Scatter-and-Gather Query)
         'use_sgq': False,
+        'point_pos_encoding': 'legacy',  # 'legacy' | 'dab'（DAB/MapQR 标准 sine PE）
         'gather_mlp_dims': 512,         # Gather MLP 隐藏层维度
         'gather_residual': 'none',      # Gather 残差模式: 'none'=无残差 / 'mean'=点均值残差 / 'identity'=实例query残差(对齐原版MapQR)
     }),
@@ -198,6 +199,7 @@ config_default = AttrDict({
 
     # ── 训练超参数 ──
     'num_epochs': 3,
+    'seed': None,   # None=保持旧行为; int=固定 random/numpy/torch 种子
     'lr': 5e-4,
     'backbone_lr_mult': 0.1,
     'weight_decay': 1e-2,

@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,18 +36,25 @@ class PointPositionalEncoding(nn.Module):
     输出: (B, num_q, num_points, embed_dims)
     """
 
-    def __init__(self, num_feats, embed_dims, normalize=True):
+    def __init__(self, num_feats, embed_dims, normalize=True, impl='legacy'):
         super().__init__()
         self.num_feats = num_feats
         self.embed_dims = embed_dims
         self.normalize = normalize
+        self.impl = impl
         self.pos_proj = nn.Linear(num_feats * 2, embed_dims)
 
     def forward(self, reference_points):
         x_embed = reference_points[..., 0]
         y_embed = reference_points[..., 1]
         dim_t = torch.arange(self.num_feats, dtype=torch.float32, device=x_embed.device)
-        dim_t = 2. ** (2 * (dim_t // 2) / self.num_feats)
+        if self.impl == 'dab':
+            scale = 2 * math.pi
+            x_embed = x_embed * scale
+            y_embed = y_embed * scale
+            dim_t = 10000 ** (2 * (dim_t // 2) / self.num_feats)
+        else:
+            dim_t = 2. ** (2 * (dim_t // 2) / self.num_feats)
         pos_x = x_embed[:, :, :, None] / dim_t
         pos_y = y_embed[:, :, :, None] / dim_t
         pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=-1).flatten(-2)
@@ -126,7 +134,9 @@ class MapTransformerLayer(nn.Module):
         # SGQ 特有模块 (仅 use_sgq=True 时创建)
         if self.use_sgq:
             num_feats = self.embed_dims // 2
-            self.point_pos_embed = PointPositionalEncoding(num_feats, self.embed_dims)
+            self.point_pos_embed = PointPositionalEncoding(
+                num_feats, self.embed_dims,
+                impl=getattr(cfg, 'point_pos_encoding', 'legacy'))
             gather_mlp_dims = getattr(cfg, 'gather_mlp_dims', self.embed_dims * 2)
             residual = getattr(cfg, 'gather_residual', 'none')
             self.gather = Gather(self.embed_dims, self.num_points, gather_mlp_dims, residual)

@@ -196,7 +196,7 @@ ps -eo pid,cmd | grep [t]rain.py
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `cross_attn_len_bucket` | 0 | >0 时把长度对齐到桶（如 64），减少动态 shape |
-| `amp` / `amp_dtype` | False | 混合精度；fp16 下 grid_sample 明显变慢，需先实测 |
+| `amp` / `amp_dtype` | False | 当前 stage2 seg head 在 fp16 下会溢出并污染 BN running stats，导致 loss NaN；A/B 一律 `amp=False` |
 | `npu_jit_compile` | False | 仅 NPU 图模式；需确认动态 shape 兼容 |
 | `model.bev_encoder.num_sampling_points` | 8 | 降到 4 可近乎减半 grid_sample 计算（精度需评估） |
 | `model.img_backbone.num_feat_levels` | 2 | 降到 1 可减少一次 cross-attn grid_sample |
@@ -220,6 +220,7 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 | 场景 | 命令 |
 |---|---|
 | 本地两阶段 | `bash run_train.sh` |
+| 当前 8 组 72-epoch A/B | `bash train.sh` |
 | 单阶段训练 | `python train.py <config>` |
 | 断点续训 | config 设置 `resume` 后 `python train.py <config>` |
 | 评测 | `python eval.py <config> --checkpoint <ckpt>` |
@@ -230,20 +231,20 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 | NPU 两阶段 | `python train.py configs_npu/stage1.py` → `configs_npu/stage2.py` |
 | 等价性检查 | `python tools/check_equiv.py --device cpu` |
 | NPU 单步分解 | `python tools/profile_step.py --config configs_npu/stage1.py` |
-| NPU 算子 profiling | `python tools/profile_ops.py --config configs_npu/stage1.py` |
+| NPU 算子 profiling | `python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof` |
 
 ---
 
-## 6. TODO / 待办
+## 6. 解码头实验记录
 
-> 状态：代码已实现，默认行为保持不变；等待 A/B 实验。
-> 最后更新：2026-11-18
+> 状态：主要实现与 A/B 已完成，默认行为保持不变。
+> 最后更新：2026-11-23
 
 | 子项 | 状态 | 备注 |
 |---|---|---|
-| 6.1 delta refinement | 已实现 | 方案 1 |
-| 6.2 learnable initial ref points | 已实现 | 方案 2 |
-| 6.3 组合方案与 A/B 实验 | 已实现，待实验 | 主实验 |
+| 6.1 delta refinement | 已实现并完成 A/B | 方案 1 |
+| 6.2 learnable / line initial ref points | 已实现并完成 A/B | 方案 2 |
+| 6.3 组合方案、结果与后续优先级 | 已完成 | 主实验 |
 
 ### 6.1 解码头迭代细化（delta refinement）
 
@@ -262,7 +263,7 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 
 #### 配置项（`configs/default.py` 的 `map_det_head`）
 ```python
-'ref_init': 'mlp',          # 'mlp' | 'learnable'，详见 6.2
+'ref_init': 'mlp',          # 'mlp' | 'learnable' | 'line'，详见 6.2
 'predict_refine': False,    # False=绝对回归(现状); True=delta 细化(类 MapTR)
 'different_heads': False,   # False=各层共享 cls/reg head; True=每层独立
 ```
@@ -276,28 +277,22 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
   - 新增 `import copy`。
   - 按 `different_heads` 选择共享 module 或 `copy.deepcopy` 每层独立 head。
   - 更新相关注释；`init_weights` 逻辑无需改。
-  - `reference_points_embed` 在 `ref_init='learnable'` 时替换为 `nn.Parameter`（详见 6.2）。
-- 新增 A/B 配置（已创建，基于 `stage2_joint_freeze_ec2_e72_d3.py`）
+  - `reference_points_embed` 在 `ref_init='learnable'` / `'line'` 时替换为 `nn.Parameter`（详见 6.2）。
+- 新增 A/B 配置（基于 `stage2_joint_freeze_ec2_e72_d3.py`）
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_baseline.py`
   - `configs_4090/stage2_joint_freeze_ec2_e72_d3_learnable.py`
   - `configs_4090/stage2_joint_freeze_ec2_e72_d3_refine.py`
   - `configs_4090/stage2_joint_freeze_ec2_e72_d3_learnable_refine.py`
   - `configs_4090/stage2_joint_freeze_ec2_e72_d3_learnable_refine_dh.py`
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_line.py`
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_line_refine.py`
+  - `configs_4090/stage2_joint_freeze_ec2_e72_d3_line_refine_dh.py`
 
-#### 验证计划
-- 恒等性：reg 输出置零时 `new_ref == ref_last`（delta 模式）。
-- logit 往返：`inverse_sigmoid(x).sigmoid() ≈ x`，0/1 边界不产生 inf/nan。
-- 默认路径回归：`predict_refine=False` 前向输出与改动前一致。
-- d3 A/B（固定 seed / batch / lr）：
-
-  | run | predict_refine | different_heads |
-  |---|---|---|
-  | baseline | False | False |
-  | delta | True | False |
-  | delta + indep（可选） | True | True |
-
-  对比逐层 `reg_loss` 曲线、收敛速度、最终 mAP@0.5/1.0/1.5。
-- 单层 smoke：`num_decoder_layers=1, predict_refine=True` 跑 1–2 epoch。
-- A/B 期间保持 `amp=False`，避免 seg-head fp16 NaN 干扰。
+#### 验证结果（已完成）
+- 恒等性、`inverse_sigmoid` 往返、`predict_refine=False` 默认路径均验证通过。
+- 实际只跑 d3；未做单层 smoke。
+- 实际 8 组 A/B 结果见 6.3。
+- 全程 `amp=False`。
 
 #### 兼容性注意
 - `predict_refine=True` 时 reg head 语义由“绝对坐标”变为“logit 偏移”；
@@ -306,36 +301,38 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 - `different_heads=True` 可用旧共享 checkpoint 初始化（各层复制同一初值）；
   反向（独立 → 共享）不推荐。
 
-### 6.2 可学习初始 reference points（learnable ref init）
+### 6.2 可学习 / line 初始 reference points
 
-> 方案 2：不做 anchor、不做曲线拟合，直接把初始 reference points 做成每个 query
-> 独立的可学习参数，并替换掉 `MLP(query)`；默认关闭，保持现状。
+> 方案 2：不做 anchor bank、不做曲线拟合，把初始 reference points 做成每个 query
+> 独立的可学习参数；支持 xavier（`learnable`）和 4×8 直线 grid（`line`）两种初始化。
+> 默认 `ref_init='mlp'`，保持现状。
 
 #### 最终决策
 
 | 项 | 决策 |
 |---|---|
 | 参数化 | `nn.Parameter(num_queries, num_points * 2)`，存 logits |
-| 初始化 | xavier（复用 `init_weights` 的通用循环） |
+| 初始化（`learnable`） | xavier（复用 `init_weights` 的通用循环） |
+| 初始化（`line`） | 4×8 直线 grid logits；在 xavier 循环之后覆盖 |
 | 是否替换 MLP | 替换 `reference_points_embed` |
-| anchor | 不做 |
+| anchor bank | 不做；`line` 是单层直线 grid 初始化 |
 | 曲线 / 二次项 | 不做 |
 | aux query | 同样替换为 `aux_reference_points` |
 | 默认值 | `ref_init='mlp'`，不改变现有行为 |
 
 #### 配置项（`configs/default.py` 的 `map_det_head`）
 ```python
-'ref_init': 'mlp',   # 'mlp' = 现状; 'learnable' = 直接可学习 ref points
+'ref_init': 'mlp',   # 'mlp' = 现状; 'learnable' = xavier; 'line' = 4×8 直线 grid
 ```
 
 #### 代码改动点
 - `models/head.py:87-99`：按 `ref_init` 条件创建 `reference_points` 或 `reference_points_embed`。
 - `models/head.py:103-110`：aux query 同理（`aux_reference_points` / `aux_ref_points_embed`）。
 - `models/head.py:158-166`：xavier 由现有通用循环覆盖，无需额外逻辑。
-- `models/head.py:199-213`：forward 走 learnable 分支：
+- `models/head.py:199-213`：forward 走 learnable / line 分支：
 
   ```python
-  if self.ref_init_mode == 'learnable':
+  if self.ref_init_mode in ('learnable', 'line'):
       ref_logits_main = self.reference_points.unsqueeze(0).expand(bs, -1, -1)
   else:
       ref_logits_main = self.reference_points_embed(query_main.permute(1, 0, 2))
@@ -347,33 +344,62 @@ python tools/profile_ops.py --config configs_npu/stage1.py --out /tmp/npu_prof  
 
 #### 验证
 - `reference_points` 形状 `(num_queries, num_points*2)`，且 `reference_points_embed` 不存在。
-- xavier 后 logits 标准差约 0.17，32 个 query 的初始 ref 互不相同。
+- `learnable`：xavier 后 logits 标准差约 0.17，32 个 query 初始 ref 互不相同。
+- `line`：32 条直线互不相同；与 grid logits maxdiff 0；覆盖度约 94.5% < 0.02。
 - `ref_init='mlp'` 路径与改动前逐位一致。
 - `predict_refine=True` 时，把 reg 输出置零，`new_ref ≈ ref_last`。
-- 初始 `ref_0` 仍接近中心一团（无 anchor，预期内）；训练中监控 ref_0 覆盖度是否提升。
+- `mlp/learnable` 初始 `ref_0` 接近中心一团；`line` 初始铺开。
 
-### 6.3 组合方案与 A/B 实验
+### 6.3 实验结果与后续优先级
 
-#### 实验矩阵（1 层与 d3 都跑）
+#### d3 8 组实验
 
-| run | ref_init | predict_refine | different_heads | 目的 |
-|---|---|---|---|---|
-| baseline | mlp | False | False | 现状 |
-| learnable | learnable | False | False | 参数化解耦 |
-| delta only | mlp | True | False | 无 anchor 的 delta |
-| learnable + delta | learnable | True | False | 主目标 |
-| learnable + delta + indep（可选） | learnable | True | True | head 独立性 |
+| run | ref_init | predict_refine | different_heads |
+|---|---|---|---|
+| baseline | mlp | False | False |
+| learnable | learnable | False | False |
+| refine | mlp | True | False |
+| learnable_refine | learnable | True | False |
+| learnable_refine_dh | learnable | True | True |
+| line | line | False | False |
+| line_refine | line | True | False |
+| line_refine_dh | line | True | True |
 
-#### 实验顺序
-1. 1 层配置：`learnable` vs `mlp`。
-2. 1 层配置：`learnable + delta` vs `mlp + delta`。
-3. d3 配置：完整矩阵。
-4. 可选：`different_heads=True` 单独 ablation。
+#### 结果摘要（val mAP）
 
-#### 指标
-- 早期 epoch 的逐层 `reg_loss` 与收敛速度。
-- 最终 mAP@0.5/1.0/1.5。
-- 端点误差、弯线子集指标。
-- 每几个 epoch 计算一次 `ref_0` 覆盖度（GT 点到 ref polyline 的最小距离）。
+- 1 epoch：baseline 0.7828，learnable 0.7998，refine 0.7311，learnable_refine 0.7456，learnable_refine_dh 0.7401。
+- 5 epoch：baseline 0.9346，learnable 0.9406，line 0.9375；delta 系列 0.9018–0.9172。
+- 72 epoch：所有 ~0.984–0.993；`line` last10 0.9914（最佳稳定），`baseline` best 0.9955（最高峰值），`learnable` 0.9945。delta 未超过 absolute，差距在噪声范围。
 
-固定 seed / batch / lr，一次只改一个开关。
+完整 1/5/72 表见 `AGENTS.md`。
+
+#### SGQ / PE / refine（5 epoch）
+
+| 实验 | mAP@5 |
+|---|---|
+| SGQ identity + legacy PE + absolute | 0.9747 |
+| SGQ identity + DAB PE + absolute | 0.9726 |
+| SGQ identity + legacy PE + refine | 0.9720 |
+
+- DAB PE 未带来提升；
+- SGQ + refine 5 epoch 略低 -0.0027，冷启动慢。
+
+#### 真实场景诊断
+
+| 指标 | train | loop2 | road |
+|---|---|---|---|
+| straight < 0.95 | 12.2% | 9.6% | **60.8%** |
+| straight < 0.80 | 1.3% | 0.1% | **24.5%** |
+| mAP | — | 0.947 | **0.230** |
+
+road 的 guide AP@1.5 也只有 0.365（boundary 0.391），主要瓶颈是弯道/路口数据覆盖，不是 backbone/BEV 容量。
+
+#### 后续优先级
+
+1. 数据/域：补弯道/路口数据；按 scene 划分；曲率加权；开启 stage2 BEV/图像增强；难例挖掘。
+2. 解冻 BEV encoder：低 lr 微调 encoder（可只解冻 encoder / 最后 backbone 层）。
+3. 分辨率/backbone/BEV：352×640、BEV 60×120/80×160、R101/ConvNeXt/Swin-T、BEVFormer 2–3 层/GKT-h/时序融合。
+4. Head/Loss：aux queries、更多点、edge direction loss、TTA/ensemble。
+5. 若继续 SGQ/refine：先对齐 MapQR 的 FFN 位置、独立 head、6 层。
+
+说明：所有实验无固定 seed；单次 epoch-1 mAP 波动约 ±0.01~0.02，结论看趋势、last10 和 AP@0.5。
